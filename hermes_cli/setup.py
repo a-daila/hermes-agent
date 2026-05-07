@@ -2446,11 +2446,13 @@ def setup_gateway(config: dict):
 
         _is_linux = _platform.system() == "Linux"
         _is_macos = _platform.system() == "Darwin"
+        _is_freebsd = _platform.system() == "FreeBSD"
 
         from hermes_cli.gateway import (
             _is_service_installed,
             _is_service_running,
             supports_systemd_services,
+            supports_freebsd_rc,
             has_conflicting_systemd_units,
             has_legacy_hermes_units,
             install_linux_gateway_from_setup,
@@ -2461,6 +2463,9 @@ def setup_gateway(config: dict):
             launchd_install,
             launchd_start,
             launchd_restart,
+            freebsd_rc_install,
+            freebsd_rc_start,
+            freebsd_rc_restart,
             UserSystemdUnavailableError,
             SystemScopeRequiresRootError,
             _system_scope_wizard_would_need_root,
@@ -2470,7 +2475,8 @@ def setup_gateway(config: dict):
         service_installed = _is_service_installed()
         service_running = _is_service_running()
         supports_systemd = supports_systemd_services()
-        supports_service_manager = supports_systemd or _is_macos
+        supports_freebsd = supports_freebsd_rc()
+        supports_service_manager = supports_systemd or _is_macos or supports_freebsd
 
         print()
         if supports_systemd and has_conflicting_systemd_units():
@@ -2490,6 +2496,8 @@ def setup_gateway(config: dict):
                         systemd_restart()
                     elif _is_macos:
                         launchd_restart()
+                    elif supports_freebsd:
+                        freebsd_rc_restart()
                 except UserSystemdUnavailableError as e:
                     print_error("  Restart failed — user systemd not reachable:")
                     for line in str(e).splitlines():
@@ -2512,6 +2520,8 @@ def setup_gateway(config: dict):
                         systemd_start()
                     elif _is_macos:
                         launchd_start()
+                    elif supports_freebsd:
+                        freebsd_rc_start()
                 except UserSystemdUnavailableError as e:
                     print_error("  Start failed — user systemd not reachable:")
                     for line in str(e).splitlines():
@@ -2522,7 +2532,12 @@ def setup_gateway(config: dict):
                 except Exception as e:
                     print_error(f"  Start failed: {e}")
         elif supports_service_manager:
-            svc_name = "systemd" if supports_systemd else "launchd"
+            if supports_systemd:
+                svc_name = "systemd"
+            elif supports_freebsd:
+                svc_name = "rc.d"
+            else:
+                svc_name = "launchd"
             if prompt_yes_no(
                 f"  Install the gateway as a {svc_name} service? (runs in background, starts on boot)",
                 True,
@@ -2532,6 +2547,9 @@ def setup_gateway(config: dict):
                     did_install = False
                     if supports_systemd:
                         installed_scope, did_install = install_linux_gateway_from_setup(force=False)
+                    elif supports_freebsd:
+                        freebsd_rc_install()
+                        did_install = True
                     else:
                         launchd_install(force=False)
                         did_install = True
@@ -2542,6 +2560,8 @@ def setup_gateway(config: dict):
                                 systemd_start(system=installed_scope == "system")
                             elif _is_macos:
                                 launchd_start()
+                            elif supports_freebsd:
+                                freebsd_rc_start()
                         except UserSystemdUnavailableError as e:
                             print_error("  Start failed — user systemd not reachable:")
                             for line in str(e).splitlines():
@@ -2557,6 +2577,8 @@ def setup_gateway(config: dict):
             else:
                 print_info("  You can install later: hermes gateway install")
                 if supports_systemd:
+                    print_info("  Or as a boot-time service: sudo hermes gateway install --system")
+                elif supports_freebsd:
                     print_info("  Or as a boot-time service: sudo hermes gateway install --system")
                 print_info("  Or run in foreground:  hermes gateway")
         else:
