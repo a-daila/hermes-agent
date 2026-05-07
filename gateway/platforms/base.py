@@ -1933,7 +1933,10 @@ class BasePlatformAdapter(ABC):
                 path = path[1:-1].strip()
             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
             if path:
-                media.append((os.path.expanduser(path), has_voice_tag))
+                expanded = os.path.expanduser(path)
+                if os.path.isdir(expanded):
+                    continue
+                media.append((expanded, has_voice_tag))
 
         # Remove MEDIA tags from content (including surrounding quote/backtick wrappers)
         if media:
@@ -2998,6 +3001,9 @@ class BasePlatformAdapter(ABC):
                         logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
 
                 for media_path, is_voice in _non_image_media:
+                    if not media_path or not os.path.isfile(media_path):
+                        logger.warning('[%s] Skipping invalid media path: %r', self.name, media_path)
+                        continue
                     if human_delay > 0:
                         await asyncio.sleep(human_delay)
                     try:
@@ -3028,6 +3034,9 @@ class BasePlatformAdapter(ABC):
 
                 # Send auto-detected local non-image files as native attachments
                 for file_path in _non_image_local:
+                    if not file_path or not os.path.isfile(file_path):
+                        logger.warning('[%s] Skipping invalid local file path: %r', self.name, file_path)
+                        continue
                     if human_delay > 0:
                         await asyncio.sleep(human_delay)
                     try:
