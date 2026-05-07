@@ -889,6 +889,8 @@ AUTHOR_MAP = {
     "paultian.research@gmail.com": "paul-tian",  # PR #19423
     "info@glesperance.com": "glesperance",  # PR #19443
     "lxl694522264@gmail.com": "EvilDrag0n",  # PR #20651
+    "chaithanya.kumar42a@gmail.com": "chaithanyak42", # PR #15624
+    "kartik.labhshetwar@mem0.ai": "kartik-mem0", # PR #15624
 }
 
 
