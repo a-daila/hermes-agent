@@ -17,6 +17,25 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
 
+def test_get_web_extract_auxiliary_metadata_uses_shared_task_store():
+    with patch(
+        "tools.web_tools.get_auxiliary_task_metadata",
+        return_value={
+            "provider": "openrouter",
+            "model": "google/gemini-3-flash-preview",
+            "context_length": 1_000_000,
+        },
+    ) as mock_get:
+        from tools.web_tools import get_web_extract_auxiliary_metadata
+
+        metadata = get_web_extract_auxiliary_metadata()
+
+    mock_get.assert_called_once_with("web_extract")
+    assert metadata["provider"] == "openrouter"
+    assert metadata["model"] == "google/gemini-3-flash-preview"
+    assert metadata["context_length"] == 1_000_000
+
+
 class TestFirecrawlClientConfig:
     """Test suite for Firecrawl client initialization."""
 

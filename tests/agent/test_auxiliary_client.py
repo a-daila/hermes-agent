@@ -22,6 +22,8 @@ from agent.auxiliary_client import (
     _is_payment_error,
     _is_rate_limit_error,
     _normalize_aux_provider,
+    get_auxiliary_task_metadata,
+    resolve_auxiliary_context_length,
     _try_payment_fallback,
     _resolve_auto,
 )
@@ -550,6 +552,45 @@ class TestGetTextAuxiliaryClient:
         assert mock_openai.call_args.kwargs["base_url"] == "https://api.openai.com/v1"
         assert mock_openai.call_args.kwargs["api_key"] == "sk-test"
 
+    def test_get_text_auxiliary_client_tracks_shared_task_metadata(self):
+        client = MagicMock()
+        client.base_url = "https://openrouter.ai/api/v1"
+        client.api_key = "sk-openrouter"
+
+        with (
+            patch("agent.auxiliary_client.resolve_provider_client", return_value=(client, "google/gemini-3-flash-preview")),
+            patch("agent.auxiliary_client.get_model_context_length", return_value=1_000_000),
+        ):
+            result_client, result_model = get_text_auxiliary_client("compression")
+
+        assert result_client is client
+        assert result_model == "google/gemini-3-flash-preview"
+        metadata = get_auxiliary_task_metadata("compression")
+        assert metadata["provider"] == "openrouter"
+        assert metadata["model"] == "google/gemini-3-flash-preview"
+        assert metadata["base_url"] == "https://openrouter.ai/api/v1"
+        assert metadata["api_key"] == "sk-openrouter"
+        assert metadata["context_length"] == 1_000_000
+
+    def test_resolve_auxiliary_context_length_uses_shared_task_store(self):
+        client = MagicMock()
+        client.base_url = "http://localhost:11434/v1"
+        client.api_key = "no-key-required"
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model", return_value=("custom", "qwen2.5", "http://localhost:11434/v1", "no-key-required", None)),
+            patch("agent.auxiliary_client._get_cached_client", return_value=(client, "qwen2.5")),
+            patch("agent.auxiliary_client.get_model_context_length", return_value=262_144),
+        ):
+            result_client, result_model, result_context = resolve_auxiliary_context_length("compression")
+
+        assert result_client is client
+        assert result_model == "qwen2.5"
+        assert result_context == 262_144
+        metadata = get_auxiliary_task_metadata("compression")
+        assert metadata["provider"] == "custom"
+        assert metadata["context_length"] == 262_144
+
 
 class TestVisionClientFallback:
     """Vision client auto mode resolves known-good multimodal backends."""
@@ -976,6 +1017,41 @@ class TestCallLlmPaymentFallback:
             )
         # Fallback client should have been used
         assert fallback_client.chat.completions.create.called
+
+    def test_payment_fallback_updates_shared_task_metadata_to_final_runtime(self, monkeypatch):
+        """After auto fallback, stored metadata should reflect the actual fallback runtime."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        primary_client = MagicMock()
+        primary_client.base_url = "https://openrouter.ai/api/v1"
+        primary_client.api_key = "sk-openrouter"
+        primary_client.chat.completions.create.side_effect = self._make_402_error()
+
+        fallback_client = MagicMock()
+        fallback_client.base_url = "https://inference-api.nousresearch.com/v1"
+        fallback_client.api_key = "nous-agent-key"
+        fallback_client.chat.completions.create.return_value = MagicMock(choices=[
+            MagicMock(message=MagicMock(content="fallback response"))
+        ])
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model", return_value=("auto", "xiaomi/mimo-v2-pro", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client", return_value=(primary_client, "xiaomi/mimo-v2-pro")),
+            patch("agent.auxiliary_client._try_payment_fallback", return_value=(fallback_client, "google/gemini-3-flash-preview", "nous")),
+            patch("agent.auxiliary_client.get_model_context_length", side_effect=[256_000, 1_000_000]),
+        ):
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        assert result.choices[0].message.content == "fallback response"
+        metadata = get_auxiliary_task_metadata("compression")
+        assert metadata["provider"] == "nous"
+        assert metadata["model"] == "google/gemini-3-flash-preview"
+        assert metadata["base_url"] == "https://inference-api.nousresearch.com/v1"
+        assert metadata["api_key"] == "nous-agent-key"
+        assert metadata["context_length"] == 1_000_000
 
 # ---------------------------------------------------------------------------
 # Gate: _resolve_api_key_provider must skip anthropic when not configured
@@ -1531,6 +1607,37 @@ class TestAuxiliaryAuthRefreshRetry:
         mock_refresh.assert_called_once_with("anthropic")
         assert stale_client.chat.completions.create.call_count == 1
         assert fresh_client.chat.completions.create.call_count == 1
+
+    def test_call_llm_refresh_updates_shared_task_metadata_to_refreshed_runtime(self):
+        stale_client = MagicMock()
+        stale_client.base_url = "https://chatgpt.com/backend-api/codex"
+        stale_client.api_key = "stale-token"
+        stale_client.chat.completions.create.side_effect = _AuxAuth401("stale codex token")
+
+        fresh_client = MagicMock()
+        fresh_client.base_url = "https://chatgpt.com/backend-api/codex"
+        fresh_client.api_key = "fresh-token"
+        fresh_client.chat.completions.create.return_value = _DummyResponse("fresh-non-vision")
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model", return_value=("openai-codex", "gpt-5.4", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client", side_effect=[(stale_client, "gpt-5.4"), (fresh_client, "gpt-5.4")]),
+            patch("agent.auxiliary_client._refresh_provider_credentials", return_value=True),
+            patch("agent.auxiliary_client.get_model_context_length", side_effect=[200_000, 200_000]),
+        ):
+            resp = call_llm(
+                task="compression",
+                provider="openai-codex",
+                model="gpt-5.4",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert resp.choices[0].message.content == "fresh-non-vision"
+        metadata = get_auxiliary_task_metadata("compression")
+        assert metadata["provider"] == "openai-codex"
+        assert metadata["model"] == "gpt-5.4"
+        assert metadata["base_url"] == "https://chatgpt.com/backend-api/codex"
+        assert metadata["api_key"] == "fresh-token"
 
     @pytest.mark.asyncio
     async def test_async_call_llm_refreshes_codex_on_401_for_vision(self):

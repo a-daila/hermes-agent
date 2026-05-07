@@ -2657,26 +2657,18 @@ class AIAgent:
             return
         try:
             from agent.auxiliary_client import (
-                _resolve_task_provider_model,
-                get_text_auxiliary_client,
+                get_auxiliary_task_metadata,
+                resolve_auxiliary_context_length,
             )
             from agent.model_metadata import (
                 MINIMUM_CONTEXT_LENGTH,
-                get_model_context_length,
             )
 
-            client, aux_model = get_text_auxiliary_client(
+            client, aux_model, aux_context = resolve_auxiliary_context_length(
                 "compression",
                 main_runtime=self._current_main_runtime(),
             )
-            # Best-effort aux provider label for the warning message. The
-            # configured provider may be "auto", in which case we fall back
-            # to the client's base_url hostname so the user can still tell
-            # where the compression model is actually being called.
-            try:
-                _aux_cfg_provider, _, _, _, _ = _resolve_task_provider_model("compression")
-            except Exception:
-                _aux_cfg_provider = ""
+            aux_metadata = get_auxiliary_task_metadata("compression")
             if client is None or not aux_model:
                 msg = (
                     "⚠ No auxiliary LLM provider configured — context "
@@ -2693,17 +2685,15 @@ class AIAgent:
 
             aux_base_url = str(getattr(client, "base_url", ""))
             aux_api_key = str(getattr(client, "api_key", ""))
-
-            aux_context = get_model_context_length(
-                aux_model,
-                base_url=aux_base_url,
-                api_key=aux_api_key,
-                config_context_length=getattr(self, "_aux_compression_context_length_config", None),
-                # Each model must be resolved with its own provider so that
-                # provider-specific paths (e.g. Bedrock static table, OpenRouter API)
-                # are invoked for the correct client, not inherited from the main model.
-                provider=(_aux_cfg_provider if _aux_cfg_provider and _aux_cfg_provider != "auto" else getattr(self, "provider", "")),
-            )
+            aux_provider = str(aux_metadata.get("provider", "") or "")
+            if hasattr(self, "context_compressor") and self.context_compressor:
+                self.context_compressor.update_summary_model(
+                    aux_model,
+                    aux_context or 0,
+                    base_url=aux_base_url,
+                    api_key=aux_api_key,
+                    provider=aux_provider,
+                )
 
             # Hard floor: the auxiliary compression model must have at least
             # MINIMUM_CONTEXT_LENGTH (64K) tokens of context.  The main model
@@ -2753,11 +2743,7 @@ class AIAgent:
                 # fall back to the client's base_url hostname.
                 _main_model = getattr(self, "model", "") or "?"
                 _main_provider = getattr(self, "provider", "") or ""
-                _aux_provider_label = (
-                    _aux_cfg_provider
-                    if _aux_cfg_provider and _aux_cfg_provider != "auto"
-                    else ""
-                )
+                _aux_provider_label = aux_provider
                 if not _aux_provider_label:
                     try:
                         from urllib.parse import urlparse

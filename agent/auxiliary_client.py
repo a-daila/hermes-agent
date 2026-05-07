@@ -100,6 +100,7 @@ class _OpenAIProxy:
 OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 
 from agent.credential_pool import load_pool
+from agent.model_metadata import get_model_context_length
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_vars
@@ -2629,7 +2630,7 @@ def get_text_auxiliary_client(
     (e.g. auxiliary.compression.model, auxiliary.web_extract.model).
     """
     provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
-    return resolve_provider_client(
+    client, final_model = resolve_provider_client(
         provider,
         model=model,
         explicit_base_url=base_url,
@@ -2637,6 +2638,16 @@ def get_text_auxiliary_client(
         api_mode=api_mode,
         main_runtime=main_runtime,
     )
+    _track_auxiliary_task_metadata(
+        task or None,
+        client=client,
+        model=final_model,
+        provider=provider,
+        base_url=base_url,
+        api_key=api_key,
+        api_mode=api_mode,
+    )
+    return client, final_model
 
 
 def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Dict[str, Any]] = None):
@@ -2647,7 +2658,7 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
     Returns (None, None) when no provider is available.
     """
     provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
-    return resolve_provider_client(
+    client, final_model = resolve_provider_client(
         provider,
         model=model,
         async_mode=True,
@@ -2656,6 +2667,16 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
         api_mode=api_mode,
         main_runtime=main_runtime,
     )
+    _track_auxiliary_task_metadata(
+        task or None,
+        client=client,
+        model=final_model,
+        provider=provider,
+        base_url=base_url,
+        api_key=api_key,
+        api_mode=api_mode,
+    )
+    return client, final_model
 
 
 _VISION_AUTO_PROVIDER_ORDER = (
@@ -3246,6 +3267,8 @@ def _resolve_task_provider_model(
 
 
 _DEFAULT_AUX_TIMEOUT = 30.0
+_AUXILIARY_TASK_METADATA: Dict[str, Dict[str, Any]] = {}
+_AUXILIARY_TASK_METADATA_LOCK = threading.Lock()
 
 
 def _get_auxiliary_task_config(task: str) -> Dict[str, Any]:
@@ -3274,6 +3297,206 @@ def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> float
         except (ValueError, TypeError):
             pass
     return default
+
+
+def _get_task_context_length_override(task: Optional[str]) -> Optional[int]:
+    """Return auxiliary.<task>.context_length when it is a valid positive int."""
+    if not task:
+        return None
+    task_config = _get_auxiliary_task_config(task)
+    raw = task_config.get("context_length")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _infer_auxiliary_provider_label(
+    configured_provider: Optional[str],
+    base_url: str,
+) -> str:
+    """Best-effort provider label for the final resolved auxiliary runtime."""
+    normalized = _normalize_aux_provider(configured_provider)
+    if normalized and normalized != "auto":
+        return normalized
+
+    runtime_base = str(base_url or "").strip().rstrip("/")
+    if not runtime_base:
+        return normalized or "auto"
+
+    if base_url_host_matches(runtime_base, "openrouter.ai"):
+        return "openrouter"
+    if (
+        base_url_host_matches(runtime_base, "inference-api.nousresearch.com")
+        or base_url_host_matches(runtime_base, "nousresearch.com")
+    ):
+        return "nous"
+    if base_url_host_matches(runtime_base, "api.anthropic.com"):
+        return "anthropic"
+    if (
+        base_url_host_matches(runtime_base, "chatgpt.com")
+        and "/backend-api/codex" in runtime_base.lower()
+    ):
+        return "openai-codex"
+    if base_url_host_matches(runtime_base, "api.githubcopilot.com"):
+        return "copilot"
+    return "custom"
+
+
+def _store_auxiliary_task_metadata(task: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist the latest resolved runtime metadata for an auxiliary task."""
+    if not task:
+        return {}
+    stored = dict(metadata)
+    stored["task"] = task
+    stored["updated_at"] = time.time()
+    with _AUXILIARY_TASK_METADATA_LOCK:
+        _AUXILIARY_TASK_METADATA[task] = stored
+    return dict(stored)
+
+
+def get_auxiliary_task_metadata(task: str) -> Dict[str, Any]:
+    """Return a copy of the latest stored runtime metadata for *task*."""
+    if not task:
+        return {}
+    with _AUXILIARY_TASK_METADATA_LOCK:
+        metadata = _AUXILIARY_TASK_METADATA.get(task, {})
+    return dict(metadata)
+
+
+def detect_auxiliary_context_length(
+    model: Optional[str],
+    *,
+    base_url: str = "",
+    api_key: str = "",
+    provider: str = "",
+    config_context_length: Optional[int] = None,
+) -> Optional[int]:
+    """Resolve the effective context window for an auxiliary runtime."""
+    if not model:
+        return None
+    try:
+        return get_model_context_length(
+            model,
+            base_url=base_url,
+            api_key=api_key,
+            config_context_length=config_context_length,
+            provider=provider,
+        )
+    except Exception as exc:
+        logger.debug(
+            "Auxiliary metadata: failed to detect context length for %s at %s: %s",
+            model,
+            base_url or "default",
+            exc,
+        )
+        return None
+
+
+def _track_auxiliary_task_metadata(
+    task: Optional[str],
+    *,
+    client: Any,
+    model: Optional[str],
+    provider: Optional[str],
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    api_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Store the final live runtime metadata for an auxiliary task."""
+    if not task or client is None or not model:
+        return {}
+
+    runtime_base_url = str(base_url or getattr(client, "base_url", "") or "").strip().rstrip("/")
+    runtime_api_key = str(api_key or getattr(client, "api_key", "") or "").strip()
+    resolved_provider = _infer_auxiliary_provider_label(provider, runtime_base_url)
+    context_override = _get_task_context_length_override(task)
+
+    existing = get_auxiliary_task_metadata(task)
+    same_runtime = (
+        existing.get("provider") == resolved_provider
+        and existing.get("model") == model
+        and existing.get("base_url") == runtime_base_url
+        and existing.get("api_key") == runtime_api_key
+        and existing.get("api_mode", "") == (api_mode or "")
+    )
+    context_length = existing.get("context_length") if same_runtime else None
+    if not isinstance(context_length, int) or context_length <= 0:
+        context_length = detect_auxiliary_context_length(
+            model,
+            base_url=runtime_base_url,
+            api_key=runtime_api_key,
+            provider=resolved_provider,
+            config_context_length=context_override,
+        )
+
+    return _store_auxiliary_task_metadata(
+        task,
+        {
+            "provider": resolved_provider,
+            "model": model,
+            "base_url": runtime_base_url,
+            "api_key": runtime_api_key,
+            "api_mode": api_mode or "",
+            "context_length": context_length,
+            "config_context_length": context_override,
+        },
+    )
+
+
+def resolve_auxiliary_context_length(
+    task: str,
+    *,
+    provider: str = None,
+    model: str = None,
+    base_url: str = None,
+    api_key: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[Any], Optional[str], Optional[int]]:
+    """Resolve an auxiliary runtime and its effective context length together."""
+    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
+        task,
+        provider,
+        model,
+        base_url,
+        api_key,
+    )
+    client, final_model = _get_cached_client(
+        resolved_provider,
+        resolved_model,
+        base_url=resolved_base_url,
+        api_key=resolved_api_key,
+        api_mode=resolved_api_mode,
+        main_runtime=main_runtime,
+    )
+    if client is None and not resolved_base_url:
+        explicit = (resolved_provider or "").strip().lower()
+        if not explicit or explicit in {"auto", "custom"}:
+            client, final_model = _get_cached_client(
+                "auto",
+                main_runtime=main_runtime,
+            )
+            resolved_provider = "auto"
+            resolved_base_url = None
+            resolved_api_key = None
+            resolved_api_mode = None
+    if client is None or not final_model:
+        return None, None, None
+
+    metadata = _track_auxiliary_task_metadata(
+        task,
+        client=client,
+        model=final_model,
+        provider=resolved_provider,
+        base_url=resolved_base_url,
+        api_key=resolved_api_key,
+        api_mode=resolved_api_mode,
+    )
+    context_length = metadata.get("context_length")
+    return client, final_model, context_length if isinstance(context_length, int) else None
 
 
 def _get_task_extra_body(task: str) -> Dict[str, Any]:
@@ -3567,6 +3790,16 @@ def call_llm(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
                 f"Run: hermes setup")
 
+    _track_auxiliary_task_metadata(
+        task,
+        client=client,
+        model=final_model,
+        provider=resolved_provider,
+        base_url=resolved_base_url,
+        api_key=resolved_api_key,
+        api_mode=resolved_api_mode,
+    )
+
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
 
     # Log what we're about to do — makes auxiliary operations visible
@@ -3662,6 +3895,15 @@ def call_llm(
                             task or "call")
                 if refreshed_model and refreshed_model != kwargs.get("model"):
                     kwargs["model"] = refreshed_model
+                _track_auxiliary_task_metadata(
+                    task,
+                    client=refreshed_client,
+                    model=refreshed_model or final_model,
+                    provider="nous",
+                    base_url=resolved_base_url,
+                    api_key=resolved_api_key,
+                    api_mode=resolved_api_mode,
+                )
                 return _validate_llm_response(
                     refreshed_client.chat.completions.create(**kwargs), task)
 
@@ -3705,6 +3947,15 @@ def call_llm(
                     _retry_base = str(getattr(retry_client, "base_url", "") or "")
                     if _is_anthropic_compat_endpoint(resolved_provider, _retry_base):
                         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
+                    _track_auxiliary_task_metadata(
+                        task,
+                        client=retry_client,
+                        model=retry_model or final_model,
+                        provider=resolved_provider,
+                        base_url=resolved_base_url,
+                        api_key=resolved_api_key,
+                        api_mode=resolved_api_mode,
+                    )
                     return _validate_llm_response(
                         retry_client.chat.completions.create(**retry_kwargs), task)
 
@@ -3752,6 +4003,15 @@ def call_llm(
                     tools=tools, timeout=effective_timeout,
                     extra_body=effective_extra_body,
                     base_url=str(getattr(fb_client, "base_url", "") or ""))
+                _track_auxiliary_task_metadata(
+                    task,
+                    client=fb_client,
+                    model=fb_model,
+                    provider=fb_label,
+                    base_url=str(getattr(fb_client, "base_url", "") or ""),
+                    api_key=str(getattr(fb_client, "api_key", "") or ""),
+                    api_mode="",
+                )
                 return _validate_llm_response(
                     fb_client.chat.completions.create(**fb_kwargs), task)
         raise
@@ -3886,6 +4146,16 @@ async def async_call_llm(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
                 f"Run: hermes setup")
 
+    _track_auxiliary_task_metadata(
+        task,
+        client=client,
+        model=final_model,
+        provider=resolved_provider,
+        base_url=resolved_base_url,
+        api_key=resolved_api_key,
+        api_mode=resolved_api_mode,
+    )
+
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
 
     # Pass the client's actual base_url (not just resolved_base_url) so
@@ -3967,6 +4237,15 @@ async def async_call_llm(
                             task or "call")
                 if refreshed_model and refreshed_model != kwargs.get("model"):
                     kwargs["model"] = refreshed_model
+                _track_auxiliary_task_metadata(
+                    task,
+                    client=refreshed_client,
+                    model=refreshed_model or final_model,
+                    provider="nous",
+                    base_url=resolved_base_url,
+                    api_key=resolved_api_key,
+                    api_mode=resolved_api_mode,
+                )
                 return _validate_llm_response(
                     await refreshed_client.chat.completions.create(**kwargs), task)
 
@@ -4009,6 +4288,15 @@ async def async_call_llm(
                     _retry_base = str(getattr(retry_client, "base_url", "") or "")
                     if _is_anthropic_compat_endpoint(resolved_provider, _retry_base):
                         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
+                    _track_auxiliary_task_metadata(
+                        task,
+                        client=retry_client,
+                        model=retry_model or final_model,
+                        provider=resolved_provider,
+                        base_url=resolved_base_url,
+                        api_key=resolved_api_key,
+                        api_mode=resolved_api_mode,
+                    )
                     return _validate_llm_response(
                         await retry_client.chat.completions.create(**retry_kwargs), task)
 
@@ -4043,6 +4331,15 @@ async def async_call_llm(
                 )
                 if async_fb_model and async_fb_model != fb_kwargs.get("model"):
                     fb_kwargs["model"] = async_fb_model
+                _track_auxiliary_task_metadata(
+                    task,
+                    client=async_fb,
+                    model=async_fb_model or fb_model,
+                    provider=fb_label,
+                    base_url=str(getattr(async_fb, "base_url", "") or ""),
+                    api_key=str(getattr(async_fb, "api_key", "") or ""),
+                    api_mode="",
+                )
                 return _validate_llm_response(
                     await async_fb.chat.completions.create(**fb_kwargs), task)
         raise

@@ -377,6 +377,22 @@ class ContextCompressor(ContextEngine):
             int(context_length * 0.05), _SUMMARY_TOKENS_CEILING,
         )
 
+    def update_summary_model(
+        self,
+        model: str,
+        context_length: int,
+        *,
+        base_url: str = "",
+        api_key: str = "",
+        provider: str = "",
+    ) -> None:
+        """Track the resolved auxiliary runtime currently used for summaries."""
+        self.summary_runtime_model = model or ""
+        self.summary_context_length = int(context_length or 0)
+        self.summary_base_url = base_url or ""
+        self.summary_api_key = api_key or ""
+        self.summary_provider = provider or ""
+
     def __init__(
         self,
         model: str,
@@ -441,6 +457,11 @@ class ContextCompressor(ContextEngine):
         self.last_completion_tokens = 0
 
         self.summary_model = summary_model_override or ""
+        self.summary_runtime_model = self.summary_model or ""
+        self.summary_context_length = 0
+        self.summary_base_url = ""
+        self.summary_api_key = ""
+        self.summary_provider = ""
 
         # Stores the previous compaction summary for iterative updates
         self._previous_summary: Optional[str] = None

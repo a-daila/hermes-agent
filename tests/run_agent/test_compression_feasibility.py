@@ -51,25 +51,48 @@ def _make_agent(
     return agent
 
 
+def _patch_aux_resolution(
+    *,
+    model: str,
+    context_length: int,
+    base_url: str,
+    api_key: str,
+    provider: str = "openrouter",
+):
+    client = MagicMock()
+    client.base_url = base_url
+    client.api_key = api_key
+    return (
+        patch(
+            "agent.auxiliary_client.resolve_auxiliary_context_length",
+            return_value=(client, model, context_length),
+        ),
+        patch(
+            "agent.auxiliary_client.get_auxiliary_task_metadata",
+            return_value={"provider": provider, "context_length": context_length},
+        ),
+        client,
+    )
+
+
 # ── Core warning logic ──────────────────────────────────────────────
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=80_000)
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_auto_corrects_threshold_when_aux_context_below_threshold(mock_get_client, mock_ctx_len):
+def test_auto_corrects_threshold_when_aux_context_below_threshold():
     """Auto-correction: aux >= 64K floor but < threshold → lower threshold
     to aux_context so compression still works this session."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
     # threshold = 100,000 — aux has 80,000 (above 64K floor, below threshold)
-    mock_client = MagicMock()
-    mock_client.base_url = "https://openrouter.ai/api/v1"
-    mock_client.api_key = "sk-aux"
-    mock_get_client.return_value = (mock_client, "google/gemini-3-flash-preview")
-
     messages = []
     agent._emit_status = lambda msg: messages.append(msg)
-
-    agent._check_compression_model_feasibility()
+    resolve_patch, metadata_patch, _client = _patch_aux_resolution(
+        model="google/gemini-3-flash-preview",
+        context_length=80_000,
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-aux",
+    )
+    with resolve_patch, metadata_patch:
+        agent._check_compression_model_feasibility()
 
     assert len(messages) == 1
     assert "Compression model" in messages[0]
@@ -87,21 +110,20 @@ def test_auto_corrects_threshold_when_aux_context_below_threshold(mock_get_clien
     assert agent.context_compressor.threshold_tokens == 80_000
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=32_768)
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_rejects_aux_below_minimum_context(mock_get_client, mock_ctx_len):
+def test_rejects_aux_below_minimum_context():
     """Hard floor: aux context < MINIMUM_CONTEXT_LENGTH (64K) → session
     refuses to start (ValueError), mirroring the main-model rejection."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
-    mock_client = MagicMock()
-    mock_client.base_url = "https://openrouter.ai/api/v1"
-    mock_client.api_key = "sk-aux"
-    mock_get_client.return_value = (mock_client, "tiny-aux-model")
-
     agent._emit_status = lambda msg: None
-
-    with pytest.raises(ValueError) as exc_info:
-        agent._check_compression_model_feasibility()
+    resolve_patch, metadata_patch, _client = _patch_aux_resolution(
+        model="tiny-aux-model",
+        context_length=32_768,
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-aux",
+    )
+    with resolve_patch, metadata_patch:
+        with pytest.raises(ValueError) as exc_info:
+            agent._check_compression_model_feasibility()
 
     err = str(exc_info.value)
     assert "tiny-aux-model" in err
@@ -110,24 +132,63 @@ def test_rejects_aux_below_minimum_context(mock_get_client, mock_ctx_len):
     assert "below the minimum" in err
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=200_000)
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_no_warning_when_aux_context_sufficient(mock_get_client, mock_ctx_len):
+def test_no_warning_when_aux_context_sufficient():
     """No warning when aux model context >= main model threshold."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
     # threshold = 100,000 — aux has 200,000 (sufficient)
-    mock_client = MagicMock()
-    mock_client.base_url = "https://openrouter.ai/api/v1"
-    mock_client.api_key = "sk-aux"
-    mock_get_client.return_value = (mock_client, "google/gemini-2.5-flash")
-
     messages = []
     agent._emit_status = lambda msg: messages.append(msg)
-
-    agent._check_compression_model_feasibility()
+    resolve_patch, metadata_patch, _client = _patch_aux_resolution(
+        model="google/gemini-2.5-flash",
+        context_length=200_000,
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-aux",
+    )
+    with resolve_patch, metadata_patch:
+        agent._check_compression_model_feasibility()
 
     assert len(messages) == 0
     assert agent._compression_warning is None
+
+
+def test_feasibility_check_uses_shared_auxiliary_context_resolution():
+    """Compression feasibility should use the shared auxiliary metadata resolver."""
+    agent = _make_agent(main_context=200_000, threshold_percent=0.50)
+    mock_client = MagicMock()
+    mock_client.base_url = "https://openrouter.ai/api/v1"
+    mock_client.api_key = "sk-aux"
+
+    with (
+        patch(
+            "agent.auxiliary_client.resolve_auxiliary_context_length",
+            return_value=(mock_client, "google/gemini-3-flash-preview", 120_000),
+        ) as mock_resolve,
+        patch(
+            "agent.auxiliary_client.get_auxiliary_task_metadata",
+            return_value={"provider": "openrouter", "context_length": 120_000},
+        ),
+    ):
+        agent._emit_status = lambda msg: None
+        agent._check_compression_model_feasibility()
+
+    mock_resolve.assert_called_once_with(
+        "compression",
+        main_runtime={
+            "model": "test-main-model",
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-test",
+            "api_mode": "chat_completions",
+        },
+    )
+    assert agent.context_compressor.threshold_tokens == 100_000
+    agent.context_compressor.update_summary_model.assert_called_once_with(
+        "google/gemini-3-flash-preview",
+        120_000,
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-aux",
+        provider="openrouter",
+    )
 
 
 def test_feasibility_check_passes_live_main_runtime():
@@ -143,12 +204,17 @@ def test_feasibility_check_passes_live_main_runtime():
     mock_client.base_url = "https://chatgpt.com/backend-api/codex"
     mock_client.api_key = "codex-token"
 
-    with patch("agent.auxiliary_client.get_text_auxiliary_client", return_value=(mock_client, "gpt-5.4")) as mock_get_client, \
-         patch("agent.model_metadata.get_model_context_length", return_value=200_000):
+    with patch(
+        "agent.auxiliary_client.resolve_auxiliary_context_length",
+        return_value=(mock_client, "gpt-5.4", 200_000),
+    ) as mock_resolve, patch(
+        "agent.auxiliary_client.get_auxiliary_task_metadata",
+        return_value={"provider": "openai-codex", "context_length": 200_000},
+    ):
         agent._emit_status = lambda msg: None
         agent._check_compression_model_feasibility()
 
-    mock_get_client.assert_called_once_with(
+    mock_resolve.assert_called_once_with(
         "compression",
         main_runtime={
             "model": "gpt-5.4",
@@ -160,52 +226,21 @@ def test_feasibility_check_passes_live_main_runtime():
     )
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=1_000_000)
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_feasibility_check_passes_config_context_length(mock_get_client, mock_ctx_len):
-    """auxiliary.compression.context_length from config is forwarded to
-    get_model_context_length so custom endpoints that lack /models still
-    report the correct context window (fixes #8499)."""
+def test_feasibility_check_uses_resolved_context_length_from_shared_metadata():
+    """Feasibility check should trust the shared resolver's detected context length."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.85)
-    agent._aux_compression_context_length_config = 1_000_000
-    mock_client = MagicMock()
-    mock_client.base_url = "http://custom-endpoint:8080/v1"
-    mock_client.api_key = "sk-custom"
-    mock_get_client.return_value = (mock_client, "custom/big-model")
-
     agent._emit_status = lambda msg: None
-    agent._check_compression_model_feasibility()
-
-    mock_ctx_len.assert_called_once_with(
-        "custom/big-model",
+    resolve_patch, metadata_patch, _client = _patch_aux_resolution(
+        model="custom/big-model",
+        context_length=1_000_000,
         base_url="http://custom-endpoint:8080/v1",
         api_key="sk-custom",
-        config_context_length=1_000_000,
-        provider="openrouter",
+        provider="custom",
     )
+    with resolve_patch, metadata_patch:
+        agent._check_compression_model_feasibility()
 
-
-@patch("agent.model_metadata.get_model_context_length", return_value=128_000)
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_feasibility_check_ignores_invalid_context_length(mock_get_client, mock_ctx_len):
-    """Non-integer context_length in config is silently ignored."""
-    agent = _make_agent(main_context=200_000, threshold_percent=0.50)
-    agent._aux_compression_context_length_config = None
-    mock_client = MagicMock()
-    mock_client.base_url = "http://custom:8080/v1"
-    mock_client.api_key = "sk-test"
-    mock_get_client.return_value = (mock_client, "custom/model")
-
-    agent._emit_status = lambda msg: None
-    agent._check_compression_model_feasibility()
-
-    mock_ctx_len.assert_called_once_with(
-        "custom/model",
-        base_url="http://custom:8080/v1",
-        api_key="sk-test",
-        config_context_length=None,
-        provider="openrouter",
-    )
+    assert agent._compression_warning is None
 
 
 def test_init_feasibility_check_uses_aux_context_override_from_config():
@@ -216,6 +251,7 @@ def test_init_feasibility_check_uses_aux_context_override_from_config():
             self.context_length = 200_000
             self.threshold_tokens = 100_000
             self.threshold_percent = 0.50
+            self.update_summary_model = MagicMock()
 
         def get_tool_schemas(self):
             return []
@@ -236,12 +272,20 @@ def test_init_feasibility_check_uses_aux_context_override_from_config():
 
     with (
         patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("hermes_logging.setup_logging"),
+        patch("hermes_logging.setup_verbose_logging"),
         patch("run_agent.get_tool_definitions", return_value=[]),
         patch("run_agent.check_toolset_requirements", return_value={}),
         patch("run_agent.OpenAI"),
         patch("run_agent.ContextCompressor", new=_StubCompressor),
-        patch("agent.auxiliary_client.get_text_auxiliary_client", return_value=(mock_client, "custom/big-model")),
-        patch("agent.model_metadata.get_model_context_length", return_value=1_000_000) as mock_ctx_len,
+        patch(
+            "agent.auxiliary_client.resolve_auxiliary_context_length",
+            return_value=(mock_client, "custom/big-model", 1_000_000),
+        ),
+        patch(
+            "agent.auxiliary_client.get_auxiliary_task_metadata",
+            return_value={"provider": "custom", "context_length": 1_000_000},
+        ),
     ):
         agent = AIAgent(
             api_key="test-key-1234567890",
@@ -252,20 +296,14 @@ def test_init_feasibility_check_uses_aux_context_override_from_config():
         )
 
     assert agent._aux_compression_context_length_config == 1_000_000
-    mock_ctx_len.assert_called_once_with(
-        "custom/big-model",
-        base_url="http://custom-endpoint:8080/v1",
-        api_key="sk-custom",
-        config_context_length=1_000_000,
-        provider="",
-    )
+    assert agent.context_compressor.update_summary_model.called
 
 
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_warns_when_no_auxiliary_provider(mock_get_client):
+@patch("agent.auxiliary_client.resolve_auxiliary_context_length")
+def test_warns_when_no_auxiliary_provider(mock_resolve):
     """Warning emitted when no auxiliary provider is configured."""
     agent = _make_agent()
-    mock_get_client.return_value = (None, None)
+    mock_resolve.return_value = (None, None, None)
 
     messages = []
     agent._emit_status = lambda msg: messages.append(msg)
@@ -290,11 +328,11 @@ def test_skips_check_when_compression_disabled():
     assert agent._compression_warning is None
 
 
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_exception_does_not_crash(mock_get_client):
+@patch("agent.auxiliary_client.resolve_auxiliary_context_length")
+def test_exception_does_not_crash(mock_resolve):
     """Exceptions in the check are caught — never blocks startup."""
     agent = _make_agent()
-    mock_get_client.side_effect = RuntimeError("boom")
+    mock_resolve.side_effect = RuntimeError("boom")
 
     messages = []
     agent._emit_status = lambda msg: messages.append(msg)
@@ -306,39 +344,37 @@ def test_exception_does_not_crash(mock_get_client):
     assert len(messages) == 0
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=100_000)
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_exact_threshold_boundary_no_warning(mock_get_client, mock_ctx_len):
+def test_exact_threshold_boundary_no_warning():
     """No warning when aux context exactly equals the threshold."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
-    mock_client = MagicMock()
-    mock_client.base_url = "https://openrouter.ai/api/v1"
-    mock_client.api_key = "sk-aux"
-    mock_get_client.return_value = (mock_client, "test-model")
-
     messages = []
     agent._emit_status = lambda msg: messages.append(msg)
-
-    agent._check_compression_model_feasibility()
+    resolve_patch, metadata_patch, _client = _patch_aux_resolution(
+        model="test-model",
+        context_length=100_000,
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-aux",
+    )
+    with resolve_patch, metadata_patch:
+        agent._check_compression_model_feasibility()
 
     assert len(messages) == 0
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=99_999)
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_just_below_threshold_auto_corrects(mock_get_client, mock_ctx_len):
+def test_just_below_threshold_auto_corrects():
     """Auto-correct fires when aux context is one token below the threshold
     (and above the 64K hard floor)."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
-    mock_client = MagicMock()
-    mock_client.base_url = "https://openrouter.ai/api/v1"
-    mock_client.api_key = "sk-aux"
-    mock_get_client.return_value = (mock_client, "small-model")
-
     messages = []
     agent._emit_status = lambda msg: messages.append(msg)
-
-    agent._check_compression_model_feasibility()
+    resolve_patch, metadata_patch, _client = _patch_aux_resolution(
+        model="small-model",
+        context_length=99_999,
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-aux",
+    )
+    with resolve_patch, metadata_patch:
+        agent._check_compression_model_feasibility()
 
     assert len(messages) == 1
     assert "small-model" in messages[0]
@@ -349,20 +385,20 @@ def test_just_below_threshold_auto_corrects(mock_get_client, mock_ctx_len):
 # ── Two-phase: __init__ + run_conversation replay ───────────────────
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=80_000)
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_warning_stored_for_gateway_replay(mock_get_client, mock_ctx_len):
+def test_warning_stored_for_gateway_replay():
     """__init__ stores the warning; _replay sends it through status_callback."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
-    mock_client = MagicMock()
-    mock_client.base_url = "https://openrouter.ai/api/v1"
-    mock_client.api_key = "sk-aux"
-    mock_get_client.return_value = (mock_client, "google/gemini-3-flash-preview")
-
     # Phase 1: __init__ — _emit_status prints (CLI) but callback is None
     vprint_messages = []
     agent._emit_status = lambda msg: vprint_messages.append(msg)
-    agent._check_compression_model_feasibility()
+    resolve_patch, metadata_patch, _client = _patch_aux_resolution(
+        model="google/gemini-3-flash-preview",
+        context_length=80_000,
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-aux",
+    )
+    with resolve_patch, metadata_patch:
+        agent._check_compression_model_feasibility()
 
     assert len(vprint_messages) == 1  # CLI got it
     assert agent._compression_warning is not None  # stored for replay
@@ -378,18 +414,18 @@ def test_warning_stored_for_gateway_replay(mock_get_client, mock_ctx_len):
     )
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=200_000)
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_no_replay_when_no_warning(mock_get_client, mock_ctx_len):
+def test_no_replay_when_no_warning():
     """_replay_compression_warning is a no-op when there's no stored warning."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
-    mock_client = MagicMock()
-    mock_client.base_url = "https://openrouter.ai/api/v1"
-    mock_client.api_key = "sk-aux"
-    mock_get_client.return_value = (mock_client, "big-model")
-
     agent._emit_status = lambda msg: None
-    agent._check_compression_model_feasibility()
+    resolve_patch, metadata_patch, _client = _patch_aux_resolution(
+        model="big-model",
+        context_length=200_000,
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-aux",
+    )
+    with resolve_patch, metadata_patch:
+        agent._check_compression_model_feasibility()
 
     assert agent._compression_warning is None
 
@@ -410,19 +446,19 @@ def test_replay_without_callback_is_noop():
     agent._replay_compression_warning()
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=80_000)
-@patch("agent.auxiliary_client.get_text_auxiliary_client")
-def test_run_conversation_clears_warning_after_replay(mock_get_client, mock_ctx_len):
+def test_run_conversation_clears_warning_after_replay():
     """After replay in run_conversation, _compression_warning is cleared
     so the warning is not sent again on subsequent turns."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
-    mock_client = MagicMock()
-    mock_client.base_url = "https://openrouter.ai/api/v1"
-    mock_client.api_key = "sk-aux"
-    mock_get_client.return_value = (mock_client, "small-model")
-
     agent._emit_status = lambda msg: None
-    agent._check_compression_model_feasibility()
+    resolve_patch, metadata_patch, _client = _patch_aux_resolution(
+        model="small-model",
+        context_length=80_000,
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-aux",
+    )
+    with resolve_patch, metadata_patch:
+        agent._check_compression_model_feasibility()
 
     assert agent._compression_warning is not None
 

@@ -89,6 +89,7 @@ Firecrawl = _FirecrawlProxy()
 from agent.auxiliary_client import (
     async_call_llm,
     extract_content_or_reasoning,
+    get_auxiliary_task_metadata,
     get_async_text_auxiliary_client,
 )
 from tools.debug_helpers import DebugSession
@@ -545,6 +546,11 @@ def _resolve_web_extract_auxiliary(model: Optional[str] = None) -> tuple[Optiona
         extra_body = get_auxiliary_extra_body() or {"tags": ["product=hermes-agent"]}
 
     return client, effective_model, extra_body
+
+
+def get_web_extract_auxiliary_metadata() -> Dict[str, Any]:
+    """Return the shared auxiliary runtime metadata for web_extract."""
+    return get_auxiliary_task_metadata("web_extract")
 
 
 def _get_default_summarizer_model() -> Optional[str]:
