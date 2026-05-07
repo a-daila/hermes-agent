@@ -6,6 +6,7 @@ and implement the required methods.
 """
 
 import asyncio
+import html
 import inspect
 import ipaddress
 import logging
@@ -1265,6 +1266,36 @@ class BasePlatformAdapter(ABC):
         # _keep_typing skips send_typing when the chat_id is in this set.
         self._typing_paused: set = set()
 
+    @staticmethod
+    def _reply_anchor_for_event(event: MessageEvent) -> Optional[str]:
+        """Return the message ID to reply to, or None when replying would mislead."""
+        if getattr(event, "_feishu_suppress_reply_to", False) or getattr(event, "_feishu_text_batch_count", 1) > 1:
+            return None
+        return (
+            event.reply_to_message_id
+            if event.source.platform == Platform.FEISHU
+            and event.source.thread_id
+            and event.reply_to_message_id
+            else event.message_id
+        )
+
+    @staticmethod
+    def _maybe_prefix_feishu_batch_mention(event: MessageEvent, text: str) -> str:
+        """For merged Feishu text bursts, @ the sender instead of reply_to-ing one message."""
+        if not text or event.source.platform != Platform.FEISHU:
+            return text
+        if getattr(event, "_feishu_text_batch_count", 1) <= 1:
+            return text
+        if str(getattr(event.source, "chat_type", "") or "").lower() in {"dm", "p2p", "private"}:
+            return text
+        if text.lstrip().startswith("<at "):
+            return text
+        user_id = getattr(event, "_feishu_at_user_id", None) or event.source.user_id
+        if not user_id:
+            return text
+        user_name = getattr(event, "_feishu_at_user_name", None) or event.source.user_name or user_id
+        return f'<at user_id="{html.escape(str(user_id), quote=True)}">{html.escape(str(user_name))}</at> {text}'
+
     @property
     def has_fatal_error(self) -> bool:
         return self._fatal_error_message is not None
@@ -2505,14 +2536,8 @@ class BasePlatformAdapter(ABC):
                 )
                 _r = await self._send_with_retry(
                     chat_id=event.source.chat_id,
-                    content=_text,
-                    reply_to=(
-                        event.reply_to_message_id
-                        if event.source.platform == Platform.FEISHU
-                        and event.source.thread_id
-                        and event.reply_to_message_id
-                        else event.message_id
-                    ),
+                    content=self._maybe_prefix_feishu_batch_mention(event, _text),
+                    reply_to=self._reply_anchor_for_event(event),
                     metadata=thread_meta,
                 )
                 if _eph_ttl > 0 and _r.success and _r.message_id:
@@ -2611,14 +2636,8 @@ class BasePlatformAdapter(ABC):
                     if _text:
                         _r = await self._send_with_retry(
                             chat_id=event.source.chat_id,
-                            content=_text,
-                            reply_to=(
-                                event.reply_to_message_id
-                                if event.source.platform == Platform.FEISHU
-                                and event.source.thread_id
-                                and event.reply_to_message_id
-                                else event.message_id
-                            ),
+                            content=self._maybe_prefix_feishu_batch_mention(event, _text),
+                            reply_to=self._reply_anchor_for_event(event),
                             metadata=_thread_meta,
                         )
                         if _eph_ttl > 0 and _r.success and _r.message_id:
@@ -2830,11 +2849,8 @@ class BasePlatformAdapter(ABC):
                 # Send the text portion
                 if text_content:
                     logger.info("[%s] Sending response (%d chars) to %s", self.name, len(text_content), event.source.chat_id)
-                    _reply_anchor = (
-                        event.reply_to_message_id
-                        if event.source.platform == Platform.FEISHU and event.source.thread_id and event.reply_to_message_id
-                        else event.message_id
-                    )
+                    text_content = self._maybe_prefix_feishu_batch_mention(event, text_content)
+                    _reply_anchor = self._reply_anchor_for_event(event)
                     result = await self._send_with_retry(
                         chat_id=event.source.chat_id,
                         content=text_content,

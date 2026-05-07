@@ -1623,6 +1623,37 @@ class TestAdapterBehavior(unittest.TestCase):
         event = adapter.handle_message.await_args.args[0]
         self.assertEqual(event.text, "A\nB")
         self.assertEqual(event.message_type, MessageType.TEXT)
+        self.assertEqual(event.message_id, "om_1")
+        self.assertEqual(getattr(event, "_feishu_text_batch_count", 1), 2)
+        self.assertTrue(getattr(event, "_feishu_suppress_reply_to", False))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_text_batch_mentions_sender_in_group_without_reply_anchor(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import MessageEvent, MessageType
+        from gateway.platforms.feishu import FeishuAdapter
+        from gateway.session import SessionSource
+
+        adapter = FeishuAdapter(PlatformConfig())
+        source = SessionSource(
+            platform=adapter.platform,
+            chat_id="oc_chat",
+            chat_name="Feishu Group",
+            chat_type="group",
+            user_id="u_user",
+            user_name="张三",
+        )
+        event = MessageEvent(text="A\nB", message_type=MessageType.TEXT, source=source, message_id="om_1")
+        event._feishu_text_batch_count = 2
+        event._feishu_suppress_reply_to = True
+        event._feishu_at_user_id = "ou_user"
+        event._feishu_at_user_name = "张三"
+
+        self.assertIsNone(adapter._reply_anchor_for_event(event))
+        self.assertEqual(
+            adapter._maybe_prefix_feishu_batch_mention(event, "收到"),
+            '<at user_id="ou_user">张三</at> 收到',
+        )
 
     @patch.dict(
         os.environ,
@@ -1672,7 +1703,13 @@ class TestAdapterBehavior(unittest.TestCase):
         first = adapter.handle_message.await_args_list[0].args[0]
         second = adapter.handle_message.await_args_list[1].args[0]
         self.assertEqual(first.text, "A\nB")
+        self.assertEqual(first.message_id, "om_1")
+        self.assertEqual(getattr(first, "_feishu_text_batch_count", 1), 2)
+        self.assertTrue(getattr(first, "_feishu_suppress_reply_to", False))
         self.assertEqual(second.text, "C")
+        self.assertEqual(second.message_id, "om_3")
+        self.assertEqual(getattr(second, "_feishu_text_batch_count", 1), 1)
+        self.assertFalse(getattr(second, "_feishu_suppress_reply_to", False))
 
     @patch.dict(os.environ, {}, clear=True)
     def test_media_batch_merges_rapid_photo_messages(self):
@@ -1962,44 +1999,6 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertEqual(result.message_id, "om_reply")
         self.assertTrue(captured["request"].request_body.reply_in_thread)
 
-    @patch.dict(os.environ, {}, clear=True)
-    def test_send_uses_metadata_reply_target_for_threaded_feishu_topic(self):
-        from gateway.config import PlatformConfig
-        from gateway.platforms.feishu import FeishuAdapter
-
-        adapter = FeishuAdapter(PlatformConfig())
-        captured = {}
-
-        class _MessageAPI:
-            def reply(self, request):
-                captured["request"] = request
-                return SimpleNamespace(
-                    success=lambda: True,
-                    data=SimpleNamespace(message_id="om_reply"),
-                )
-
-        adapter._client = SimpleNamespace(
-            im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI()))
-        )
-
-        async def _direct(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct):
-            result = asyncio.run(
-                adapter.send(
-                    chat_id="oc_chat",
-                    content="status update",
-                    metadata={
-                        "thread_id": "omt-thread",
-                        "reply_to_message_id": "om_trigger",
-                    },
-                )
-            )
-
-        self.assertTrue(result.success)
-        self.assertEqual(captured["request"].message_id, "om_trigger")
-        self.assertTrue(captured["request"].request_body.reply_in_thread)
 
     @patch.dict(os.environ, {}, clear=True)
     def test_send_retries_transient_failure(self):

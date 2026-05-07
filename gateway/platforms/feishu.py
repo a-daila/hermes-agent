@@ -2812,6 +2812,8 @@ class FeishuAdapter(BasePlatformAdapter):
             reply_to_text=reply_to_text,
             timestamp=datetime.now(),
         )
+        normalized._feishu_at_user_id = getattr(sender_id, "open_id", None) or sender_profile["user_id"]  # type: ignore[attr-defined]
+        normalized._feishu_at_user_name = sender_profile["user_name"]  # type: ignore[attr-defined]
         await self._dispatch_inbound_event(normalized)
 
     async def _dispatch_inbound_event(self, event: MessageEvent) -> None:
@@ -3144,6 +3146,11 @@ class FeishuAdapter(BasePlatformAdapter):
         existing = self._pending_text_batches.get(key)
         if existing is None:
             event._last_chunk_len = chunk_len  # type: ignore[attr-defined]
+            event._feishu_text_batch_count = 1  # type: ignore[attr-defined]
+            if not getattr(event, "_feishu_at_user_id", None):
+                event._feishu_at_user_id = event.source.user_id  # type: ignore[attr-defined]
+            if not getattr(event, "_feishu_at_user_name", None):
+                event._feishu_at_user_name = event.source.user_name  # type: ignore[attr-defined]
             self._pending_text_batches[key] = event
             self._pending_text_batch_counts[key] = 1
             self._schedule_text_batch_flush(key)
@@ -3151,6 +3158,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
         if not self._text_batch_is_compatible(existing, event):
             await self._flush_text_batch_now(key)
+            event._feishu_text_batch_count = 1  # type: ignore[attr-defined]
             self._pending_text_batches[key] = event
             self._pending_text_batch_counts[key] = 1
             self._schedule_text_batch_flush(key)
@@ -3162,6 +3170,7 @@ class FeishuAdapter(BasePlatformAdapter):
         next_text = f"{existing.text}\n{appended_text}" if existing.text and appended_text else (existing.text or appended_text)
         if next_count > self._text_batch_max_messages or len(next_text) > self._text_batch_max_chars:
             await self._flush_text_batch_now(key)
+            event._feishu_text_batch_count = 1  # type: ignore[attr-defined]
             self._pending_text_batches[key] = event
             self._pending_text_batch_counts[key] = 1
             self._schedule_text_batch_flush(key)
@@ -3169,9 +3178,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
         existing.text = next_text
         existing._last_chunk_len = chunk_len  # type: ignore[attr-defined]
+        existing._feishu_text_batch_count = next_count  # type: ignore[attr-defined]
+        existing._feishu_suppress_reply_to = True  # type: ignore[attr-defined]
         existing.timestamp = event.timestamp
-        if event.message_id:
-            existing.message_id = event.message_id
+        # Keep existing.message_id anchored to the first message in the burst.
+        # Batched Feishu replies suppress reply_to and @ the sender instead, so
+        # updating this to the latest message only creates misleading anchors if
+        # another send path accidentally uses it.
         self._pending_text_batch_counts[key] = next_count
         self._schedule_text_batch_flush(key)
 
@@ -3222,10 +3235,14 @@ class FeishuAdapter(BasePlatformAdapter):
         self._pending_text_batch_counts.pop(key, None)
         if not event:
             return
+        batch_count = getattr(event, "_feishu_text_batch_count", 1)
         logger.info(
-            "[Feishu] Flushing text batch %s (%d chars)",
+            "[Feishu] Flushing text batch %s (%d chars, %d message%s, reply_to=%s)",
             key,
             len(event.text or ""),
+            batch_count,
+            "s" if batch_count != 1 else "",
+            "suppressed_with_at" if batch_count > 1 else (event.message_id or "none"),
         )
         await self._handle_message_with_guards(event)
 
@@ -4089,18 +4106,15 @@ class FeishuAdapter(BasePlatformAdapter):
         reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]],
     ) -> Any:
-        effective_reply_to = reply_to
-        if not effective_reply_to and metadata and metadata.get("thread_id"):
-            effective_reply_to = metadata.get("reply_to_message_id")
         reply_in_thread = bool((metadata or {}).get("thread_id"))
-        if effective_reply_to:
+        if reply_to:
             body = self._build_reply_message_body(
                 content=payload,
                 msg_type=msg_type,
                 reply_in_thread=reply_in_thread,
                 uuid_value=str(uuid.uuid4()),
             )
-            request = self._build_reply_message_request(effective_reply_to, body)
+            request = self._build_reply_message_request(reply_to, body)
             return await asyncio.to_thread(self._client.im.v1.message.reply, request)
 
         body = self._build_create_message_body(
