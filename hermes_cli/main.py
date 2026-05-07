@@ -971,7 +971,13 @@ def _tui_build_needed(tui_dir: Path) -> bool:
 
 def _hermes_ink_bundle_stale(tui_dir: Path) -> bool:
     ink_root = tui_dir / "packages" / "hermes-ink"
-    bundle = ink_root / "dist" / "ink-bundle.js"
+    # The package build script (`esbuild src/entry-exports.ts ... --outdir=dist`)
+    # emits dist/entry-exports.js.  Older builds also left an ink-bundle.js
+    # compatibility artifact behind, but the build script does not refresh it.
+    # Checking the stale compatibility file makes every TUI launch rebuild the
+    # bundle, which blocks Dashboard /api/pty long enough for the WebSocket
+    # handshake to time out and the WebUI to print "[session ended]".
+    bundle = ink_root / "dist" / "entry-exports.js"
     if not bundle.exists():
         return True
     bm = bundle.stat().st_mtime
