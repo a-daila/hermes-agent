@@ -161,7 +161,11 @@ uv pip install -e ".[all,dev]"
 scripts/run_tests.sh
 ```
 
-> **RL Training (optional):** The RL/Atropos integration (`environments/`) ships via the `atroposlib` and `tinker` dependencies pulled in by `.[all,dev]` — no submodule setup required.
+> **RL Training (optional):** For RL/Tinker-Atropos integration development:
+> ```bash
+> git submodule update --init tinker-atropos
+> uv pip install -e "./tinker-atropos"
+> ```
 
 ---
 
