@@ -1313,3 +1313,58 @@ class TestRefreshLevelLock:
         t.join(timeout=1)
         assert not t.is_alive(), "Refresh thread did not stop"
         assert iterations > 0, "Refresh thread never ran"
+
+
+class TestNoReturnInFinally:
+    """Regression test: _voice_stop_and_transcribe must not contain
+    a return statement inside its finally block.
+
+    Python 3.14+ emits SyntaxWarning for return-in-finally because it
+    silently suppresses in-flight exceptions.  Moving the business logic
+    (no-speech tracking, continuous-mode restart) out of finally while
+    keeping only cleanup (voice_processing flag, temp-file removal) inside
+    resolves the warning without changing runtime behaviour.
+
+    See: https://github.com/NousResearch/hermes-agent/issues/21088
+    """
+
+    def test_no_return_in_finally_block(self):
+        with open("cli.py") as f:
+            source = f.read()
+
+        lines = source.split("\n")
+        in_method = False
+        in_finally = False
+        finally_indent = 0
+        violations = []
+
+        for lineno, line in enumerate(lines, 1):
+            if "def _voice_stop_and_transcribe" in line:
+                in_method = True
+                in_finally = False
+                continue
+            if in_method:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                # Detect method end (next def/class at same or lower indent)
+                if (stripped.startswith("def ") or stripped.startswith("class ")) and not line.startswith("    "):
+                    break
+                if stripped == "finally:" and line.rstrip().endswith("finally:"):
+                    in_finally = True
+                    finally_indent = len(line) - len(line.lstrip())
+                    continue
+                if in_finally:
+                    current_indent = len(line) - len(line.lstrip())
+                    # End of finally block: dedented to or past finally indent
+                    if stripped and current_indent <= finally_indent:
+                        in_finally = False
+                    elif "return" in stripped and not stripped.startswith("#"):
+                        violations.append(lineno)
+
+        assert not violations, (
+            f"_voice_stop_and_transcribe has return-in-finally at line(s) {violations}. "
+            f"Python 3.14+ emits SyntaxWarning for this pattern. "
+            f"Move business logic out of the finally block. "
+            f"See https://github.com/NousResearch/hermes-agent/issues/21088"
+        )

@@ -8705,13 +8705,14 @@ class HermesCLI:
                 pass
 
             # Track consecutive no-speech cycles to avoid infinite restart loops.
+            _stop_continuous = False
             if not submitted:
                 self._no_speech_count = getattr(self, '_no_speech_count', 0) + 1
                 if self._no_speech_count >= 3:
                     self._voice_continuous = False
                     self._no_speech_count = 0
                     _cprint(f"{_DIM}No speech detected 3 times, continuous mode stopped.{_RST}")
-                    return
+                    _stop_continuous = True
             else:
                 self._no_speech_count = 0
 
@@ -8719,7 +8720,10 @@ class HermesCLI:
             # restart recording so the user can keep talking.
             # (When transcript IS submitted, process_loop handles restart
             # after chat() completes.)
-            if self._voice_continuous and not submitted and not self._voice_recording:
+            if (not _stop_continuous
+                    and self._voice_continuous
+                    and not submitted
+                    and not self._voice_recording):
                 def _restart_recording():
                     try:
                         self._voice_start_recording()
