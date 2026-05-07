@@ -123,6 +123,22 @@ def decide_image_input_mode(
     if _explicit_aux_vision_override(cfg):
         return "text"
 
+    # Per-model vision capability override in config.yaml:
+    #   agent:
+    #     vision_capability_overrides:
+    #       mimo-v2.5-pro: false
+    #       gpt-4o: true
+    # Allows users to correct inaccurate models.dev metadata (issue #21160).
+    if isinstance(cfg, dict):
+        agent_cfg = cfg.get("agent") or {}
+        if isinstance(agent_cfg, dict):
+            overrides = agent_cfg.get("vision_capability_overrides") or {}
+            if isinstance(overrides, dict):
+                # Match by model slug or provider/model key
+                for key, val in overrides.items():
+                    if key == model or key == f"{provider}/{model}":
+                        return "native" if val else "text"
+
     supports = _lookup_supports_vision(provider, model)
     if supports is True:
         return "native"
