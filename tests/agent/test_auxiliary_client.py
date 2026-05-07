@@ -977,6 +977,72 @@ class TestCallLlmPaymentFallback:
         # Fallback client should have been used
         assert fallback_client.chat.completions.create.called
 
+    def test_401_auth_error_triggers_fallback_after_refresh_failure(self):
+        """401 auth errors should fall back when refresh is unavailable/unsuccessful."""
+        primary_client = MagicMock()
+        primary_client.base_url = "https://api.minimax.chat/v1"
+        primary_client.chat.completions.create.side_effect = _AuxAuth401("expired minimax key")
+
+        fallback_client = MagicMock()
+        fallback_client.base_url = "https://openrouter.ai/api/v1"
+        fallback_client.chat.completions.create.return_value = _DummyResponse("fallback auth response")
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("auto", "minimax/minimax-m2.7", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client",
+                  return_value=(primary_client, "minimax/minimax-m2.7")),
+            patch("agent.auxiliary_client._refresh_provider_credentials", return_value=False) as mock_refresh,
+            patch("agent.auxiliary_client._try_payment_fallback",
+                  return_value=(fallback_client, "fallback-model", "openrouter")) as mock_fallback,
+        ):
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        assert result.choices[0].message.content == "fallback auth response"
+        mock_refresh.assert_not_called()
+        mock_fallback.assert_called_once_with("auto", "compression", reason="auth error")
+        assert primary_client.chat.completions.create.call_count == 1
+        assert fallback_client.chat.completions.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_async_401_auth_error_triggers_fallback_after_refresh_failure(self):
+        """Async 401 auth errors should also fall back after refresh fails."""
+        primary_client = MagicMock()
+        primary_client.base_url = "https://api.minimax.chat/v1"
+        primary_client.chat.completions.create = AsyncMock(side_effect=_AuxAuth401("expired minimax key"))
+
+        fallback_sync_client = MagicMock()
+        fallback_sync_client.base_url = "https://openrouter.ai/api/v1"
+
+        fallback_async_client = MagicMock()
+        fallback_async_client.base_url = "https://openrouter.ai/api/v1"
+        fallback_async_client.chat.completions.create = AsyncMock(return_value=_DummyResponse("async fallback auth response"))
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("auto", "minimax/minimax-m2.7", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client",
+                  return_value=(primary_client, "minimax/minimax-m2.7")),
+            patch("agent.auxiliary_client._refresh_provider_credentials", return_value=False) as mock_refresh,
+            patch("agent.auxiliary_client._try_payment_fallback",
+                  return_value=(fallback_sync_client, "fallback-model", "openrouter")) as mock_fallback,
+            patch("agent.auxiliary_client._to_async_client",
+                  return_value=(fallback_async_client, "fallback-model")),
+        ):
+            result = await async_call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        assert result.choices[0].message.content == "async fallback auth response"
+        mock_refresh.assert_not_called()
+        mock_fallback.assert_called_once_with("auto", "compression", reason="auth error")
+        assert primary_client.chat.completions.create.await_count == 1
+        assert fallback_async_client.chat.completions.create.await_count == 1
+
 # ---------------------------------------------------------------------------
 # Gate: _resolve_api_key_provider must skip anthropic when not configured
 # ---------------------------------------------------------------------------
