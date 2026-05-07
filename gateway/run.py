@@ -8750,19 +8750,25 @@ class GatewayRunner:
         event: MessageEvent,
         adapter,
     ) -> None:
-        """Extract MEDIA: tags and local file paths from a response and deliver them.
+        """Extract MEDIA: tags from a response and deliver the attachments.
 
         Called after streaming has already sent the text to the user, so the
         text itself is already delivered — this only handles file attachments
         that the normal _process_message_background path would have caught.
+
+        Only *explicit* ``MEDIA:`` directives are promoted to uploads.  Bare
+        local filesystem paths that happen to appear in tool output or
+        inspected content are intentionally ignored here: the user-visible
+        reply has already been sent without them, so attaching those paths
+        post-stream would leak internal/stale references the assistant never
+        meant to surface.  (Fixes #20834.)
         """
         from pathlib import Path
         from urllib.parse import quote as _quote
 
         try:
             media_files, _ = adapter.extract_media(response)
-            _, cleaned = adapter.extract_images(response)
-            local_files, _ = adapter.extract_local_files(cleaned)
+            local_files: list = []  # intentionally empty — see docstring
 
             _thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
 
