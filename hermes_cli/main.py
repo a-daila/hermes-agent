@@ -8586,12 +8586,12 @@ def main():
 
     # gateway start
     gateway_start = gateway_subparsers.add_parser(
-        "start", help="Start the installed systemd/launchd background service"
+        "start", help="Start the installed background service (systemd/launchd/rc.d)"
     )
     gateway_start.add_argument(
         "--system",
         action="store_true",
-        help="Target the Linux system-level gateway service",
+        help="Target the system-level gateway service (Linux/FreeBSD)",
     )
     gateway_start.add_argument(
         "--all",
@@ -8604,7 +8604,7 @@ def main():
     gateway_stop.add_argument(
         "--system",
         action="store_true",
-        help="Target the Linux system-level gateway service",
+        help="Target the system-level gateway service (Linux/FreeBSD)",
     )
     gateway_stop.add_argument(
         "--all",
@@ -8619,7 +8619,7 @@ def main():
     gateway_restart.add_argument(
         "--system",
         action="store_true",
-        help="Target the Linux system-level gateway service",
+        help="Target the system-level gateway service (Linux/FreeBSD)",
     )
     gateway_restart.add_argument(
         "--all",
@@ -8639,23 +8639,23 @@ def main():
     gateway_status.add_argument(
         "--system",
         action="store_true",
-        help="Target the Linux system-level gateway service",
+        help="Target the system-level gateway service (Linux/FreeBSD)",
     )
 
     # gateway install
     gateway_install = gateway_subparsers.add_parser(
-        "install", help="Install gateway as a systemd/launchd background service"
+        "install", help="Install gateway as a background service (systemd/launchd/rc.d)"
     )
     gateway_install.add_argument("--force", action="store_true", help="Force reinstall")
     gateway_install.add_argument(
         "--system",
         action="store_true",
-        help="Install as a Linux system-level service (starts at boot)",
+        help="Install as a system-level service (Linux/FreeBSD; starts at boot)",
     )
     gateway_install.add_argument(
         "--run-as-user",
         dest="run_as_user",
-        help="User account the Linux system service should run as",
+        help="User account the system-level service should run as (Linux/FreeBSD)",
     )
 
     # gateway uninstall
@@ -8665,7 +8665,7 @@ def main():
     gateway_uninstall.add_argument(
         "--system",
         action="store_true",
-        help="Target the Linux system-level gateway service",
+        help="Target the system-level gateway service (Linux/FreeBSD)",
     )
 
     # gateway setup

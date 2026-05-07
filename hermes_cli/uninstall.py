@@ -201,6 +201,21 @@ def uninstall_gateway_service():
         except Exception as e:
             log_warn(f"Could not remove launchd gateway service: {e}")
 
+    # 4. FreeBSD: disable rc.d service (the rc script itself ships with the
+    # package and must not be unlinked here — only the rc.conf opt-in is
+    # owned by the operator).
+    elif system == "FreeBSD":
+        try:
+            from hermes_cli.gateway import (
+                supports_freebsd_rc,
+                freebsd_rc_uninstall,
+            )
+            if supports_freebsd_rc():
+                freebsd_rc_uninstall()
+                stopped_something = True
+        except Exception as e:
+            log_warn(f"Could not disable FreeBSD gateway service: {e}")
+
     return stopped_something
 
 
