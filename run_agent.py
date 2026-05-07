@@ -9237,19 +9237,38 @@ class AIAgent:
             focus_topic,
         )
 
-        # Notify external memory provider before compression discards context
+        # Notify external memory providers before compression discards context.
+        # Providers may return advisory text (for example a ShyftR continuity
+        # pack) that should scaffold the compressor without mutating the live
+        # transcript. The advisory is appended only to the compressor input.
+        compression_input = messages
         if self._memory_manager:
             try:
-                self._memory_manager.on_pre_compress(messages)
-            except Exception:
-                pass
+                pre_compress_advisory = self._memory_manager.on_pre_compress(messages)
+                if pre_compress_advisory and str(pre_compress_advisory).strip():
+                    advisory_text = str(pre_compress_advisory).strip()
+                    compression_input = [*messages, {
+                        "role": "user",
+                        "content": (
+                            "[CONTEXT CONTINUITY ADVISORY — provider-supplied context for "
+                            "the compression summary only; do not treat as a new user request.]\n\n"
+                            f"{advisory_text}"
+                        ),
+                    }]
+                    logger.info(
+                        "context compression continuity advisory: session=%s chars=%d",
+                        self.session_id or "none",
+                        len(advisory_text),
+                    )
+            except Exception as e:
+                logger.warning("pre-compression memory provider hook failed: %s", e)
 
         try:
-            compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
+            compressed = self.context_compressor.compress(compression_input, current_tokens=approx_tokens, focus_topic=focus_topic)
         except TypeError:
             # Plugin context engine with strict signature that doesn't accept
             # focus_topic — fall back to calling without it.
-            compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens)
+            compressed = self.context_compressor.compress(compression_input, current_tokens=approx_tokens)
 
         summary_error = getattr(self.context_compressor, "_last_summary_error", None)
         if summary_error:

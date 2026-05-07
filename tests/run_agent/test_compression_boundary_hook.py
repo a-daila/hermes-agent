@@ -11,6 +11,7 @@ dag_nodes: 0). With boundary_reason="compression" plugins can distinguish
 this from a real user-initiated /new.
 """
 
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -154,3 +155,72 @@ class TestCompressionBoundaryHook:
             )
             assert compressed
             assert agent.session_id != original_sid
+
+
+class TestCompressionContinuityAdvisory:
+    def _make_agent(self):
+        from run_agent import AIAgent
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
+            return AIAgent(
+                api_key="test-key",
+                base_url="https://openrouter.ai/api/v1",
+                model="test/model",
+                quiet_mode=True,
+                session_db=None,
+                session_id="continuity-session",
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+    def _compressor(self):
+        compressor = MagicMock()
+        compressor.compress.return_value = [{"role": "user", "content": "summary"}]
+        compressor.compression_count = 1
+        compressor.last_prompt_tokens = 0
+        compressor.last_completion_tokens = 0
+        compressor._last_summary_error = None
+        compressor._last_aux_model_failure_model = None
+        compressor._last_aux_model_failure_error = None
+        return compressor
+
+    def test_pre_compress_advisory_context_is_passed_to_compressor_and_logged(self, caplog):
+        agent = self._make_agent()
+        compressor = self._compressor()
+        agent.context_compressor = compressor
+
+        memory_manager = MagicMock()
+        memory_manager.build_system_prompt.return_value = ""
+        memory_manager.on_pre_compress.return_value = "## ShyftR Continuity Pack\n- Preserve adapter handoff facts."
+        agent._memory_manager = memory_manager
+
+        messages = [{"role": "user", "content": "original message"}]
+        with caplog.at_level(logging.INFO, logger="run_agent"):
+            agent._compress_context(messages, "sys", approx_tokens=1234)
+
+        compressed_input = compressor.compress.call_args.args[0]
+        assert compressed_input[:-1] == messages
+        assert compressed_input[-1]["role"] == "user"
+        assert "[CONTEXT CONTINUITY ADVISORY" in compressed_input[-1]["content"]
+        assert "ShyftR Continuity Pack" in compressed_input[-1]["content"]
+        assert "Preserve adapter handoff facts" in compressed_input[-1]["content"]
+        assert messages == [{"role": "user", "content": "original message"}]
+        assert any("context compression continuity advisory" in record.message for record in caplog.records)
+
+    def test_pre_compress_advisory_failure_is_logged_and_nonfatal(self, caplog):
+        agent = self._make_agent()
+        compressor = self._compressor()
+        agent.context_compressor = compressor
+
+        memory_manager = MagicMock()
+        memory_manager.build_system_prompt.return_value = ""
+        memory_manager.on_pre_compress.side_effect = RuntimeError("continuity unavailable")
+        agent._memory_manager = memory_manager
+
+        with caplog.at_level(logging.WARNING, logger="run_agent"):
+            compressed, _prompt = agent._compress_context(
+                [{"role": "user", "content": "m"}], "sys", approx_tokens=100
+            )
+
+        assert compressed == [{"role": "user", "content": "summary"}]
+        assert compressor.compress.called
+        assert any("pre-compression memory provider hook failed" in record.message for record in caplog.records)
