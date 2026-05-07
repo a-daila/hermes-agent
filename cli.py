@@ -77,6 +77,19 @@ from hermes_cli.banner import _format_context_length, format_banner_version_labe
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
+def _require_interactive_stdin_tty() -> None:
+    """Fail fast before prompt_toolkit tries to attach to non-TTY stdin."""
+    if not sys.stdin.isatty():
+        print(
+            "Error: interactive Hermes requires a terminal on stdin.\n"
+            "Run `hermes` directly in a terminal, use `hermes </dev/tty` "
+            "when a wrapper has redirected stdin, or use `hermes -z \"...\"` "
+            "for non-interactive prompts.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_constants import get_hermes_home, display_hermes_home
@@ -10215,6 +10228,8 @@ class HermesCLI:
 
     def run(self):
         """Run the interactive CLI loop with persistent input at bottom."""
+        _require_interactive_stdin_tty()
+
         # Push the entire TUI to the bottom of the terminal so the banner,
         # responses, and prompt all appear pinned to the bottom — empty
         # space stays above, not below.  This prints enough blank lines to
@@ -12339,10 +12354,6 @@ def main(
     """
     global _active_worktree
 
-    # Signal to terminal_tool that we're in interactive mode
-    # This enables interactive sudo password prompts with timeout
-    os.environ["HERMES_INTERACTIVE"] = "1"
-    
     # Handle gateway mode (messaging + cron)
     if gateway:
         import asyncio
@@ -12350,6 +12361,17 @@ def main(
         print("Starting Hermes Gateway (messaging platforms)...")
         asyncio.run(start_gateway())
         return
+
+    # Handle query shorthand before deciding whether this is an interactive
+    # prompt-toolkit launch. Single-query/list modes are intentionally usable
+    # with piped or redirected stdin.
+    query = query or q
+    if not (query or image or list_tools or list_toolsets):
+        _require_interactive_stdin_tty()
+
+    # Signal to terminal_tool that we're in interactive mode
+    # This enables interactive sudo password prompts with timeout
+    os.environ["HERMES_INTERACTIVE"] = "1"
 
     # Skip worktree for list commands (they exit immediately)
     if not list_tools and not list_toolsets:
@@ -12374,9 +12396,6 @@ def main(
                 return
     else:
         wt_info = None
-    
-    # Handle query shorthand
-    query = query or q
     
     # Parse toolsets - handle both string and tuple/list inputs
     # Default to hermes-cli toolset which includes cronjob management tools
