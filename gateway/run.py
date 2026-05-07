@@ -6489,6 +6489,7 @@ class GatewayRunner:
                                     skip_memory=True,
                                     enabled_toolsets=["memory"],
                                     session_id=session_entry.session_id,
+                                    session_db=self._session_db,
                                 )
                                 try:
                                     _hyg_agent._print_fn = lambda *a, **kw: None
@@ -9732,6 +9733,7 @@ class GatewayRunner:
                 skip_memory=True,
                 enabled_toolsets=["memory"],
                 session_id=session_entry.session_id,
+                session_db=self._session_db,
             )
             try:
                 tmp_agent._print_fn = lambda *a, **kw: None
