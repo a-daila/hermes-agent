@@ -231,3 +231,139 @@ class TestOpenVikingBrowse:
             "/api/v1/fs/ls",
             {"uri": "viking://user/hermes"},
         )]
+
+
+# ===================================================================
+# Issue #21130 bug 1 — header conflict with API-key auth
+# ===================================================================
+
+from unittest.mock import patch as _patch
+from plugins.memory.openviking import _VikingClient as _Vc
+
+
+class TestVikingClientHeaders:
+    """Verify tenant headers don't conflict with API-key auth (#21130 bug 1)."""
+
+    def test_api_key_auth_omits_tenant_headers(self):
+        with _patch("plugins.memory.openviking._get_httpx", return_value=object()):
+            client = _Vc(
+                "http://srv:31933",
+                api_key="sk-key-123",
+                account="acct", user="usr", agent="agt",
+            )
+        h = client._headers()
+        assert h["X-API-Key"] == "sk-key-123"
+        assert "X-OpenViking-Account" not in h
+        assert "X-OpenViking-User" not in h
+        assert "X-OpenViking-Agent" not in h
+
+    def test_local_dev_mode_sends_tenant_headers(self):
+        with _patch("plugins.memory.openviking._get_httpx", return_value=object()):
+            client = _Vc(
+                "http://srv:31933",
+                api_key="",
+                account="acct", user="usr", agent="agt",
+            )
+        h = client._headers()
+        assert "X-API-Key" not in h
+        assert h["X-OpenViking-Account"] == "acct"
+        assert h["X-OpenViking-User"] == "usr"
+        assert h["X-OpenViking-Agent"] == "agt"
+
+    def test_content_type_always_present(self):
+        with _patch("plugins.memory.openviking._get_httpx", return_value=object()):
+            with_key = _Vc("http://srv", api_key="x")
+            no_key = _Vc("http://srv", api_key="")
+        assert with_key._headers()["Content-Type"] == "application/json"
+        assert no_key._headers()["Content-Type"] == "application/json"
+
+
+# ===================================================================
+# Issue #21130 bug 2 — env not reloaded after /reload
+# ===================================================================
+
+
+class TestEnsureClientReloadsEnv:
+    """Verify /reload picks up new OPENVIKING_* values without restart (#21130 bug 2)."""
+
+    def test_ensure_client_rebuilds_when_api_key_changes(self, monkeypatch):
+        constructions = []
+
+        class _StubClient:
+            def __init__(self, endpoint, api_key, account="default", user="default", agent="hermes"):
+                constructions.append({"endpoint": endpoint, "api_key": api_key,
+                                      "account": account, "user": user, "agent": agent})
+                self.endpoint, self.api_key = endpoint, api_key
+                self.account, self.user, self.agent = account, user, agent
+
+            def health(self):
+                return True
+
+        monkeypatch.setattr("plugins.memory.openviking._VikingClient", _StubClient)
+        monkeypatch.setenv("OPENVIKING_ENDPOINT", "http://srv:31933")
+        monkeypatch.setenv("OPENVIKING_API_KEY", "")
+
+        provider = OpenVikingMemoryProvider()
+        first = provider._ensure_client()
+        assert first is not None
+        assert first.api_key == ""
+        assert len(constructions) == 1
+
+        # Same env on second call — must reuse cached client (no rebuild).
+        assert provider._ensure_client() is first
+        assert len(constructions) == 1
+
+        # Simulate /reload: env now carries the new API key.
+        monkeypatch.setenv("OPENVIKING_API_KEY", "sk-fresh")
+        rebuilt = provider._ensure_client()
+        assert rebuilt is not None
+        assert rebuilt is not first
+        assert rebuilt.api_key == "sk-fresh"
+        assert len(constructions) == 2
+
+    def test_ensure_client_rebuilds_when_endpoint_changes(self, monkeypatch):
+        builds = []
+
+        class _StubClient:
+            def __init__(self, endpoint, api_key, **kw):
+                builds.append(endpoint)
+                self.endpoint = endpoint
+
+            def health(self):
+                return True
+
+        monkeypatch.setattr("plugins.memory.openviking._VikingClient", _StubClient)
+        monkeypatch.setenv("OPENVIKING_ENDPOINT", "http://a")
+        monkeypatch.setenv("OPENVIKING_API_KEY", "key")
+
+        provider = OpenVikingMemoryProvider()
+        provider._ensure_client()
+        provider._ensure_client()  # cached
+        monkeypatch.setenv("OPENVIKING_ENDPOINT", "http://b")
+        provider._ensure_client()  # rebuilds
+        assert builds == ["http://a", "http://b"]
+
+    def test_ensure_client_returns_none_when_health_fails(self, monkeypatch):
+        class _StubClient:
+            def __init__(self, *a, **kw): pass
+            def health(self): return False
+
+        monkeypatch.setattr("plugins.memory.openviking._VikingClient", _StubClient)
+        monkeypatch.setenv("OPENVIKING_ENDPOINT", "http://dead")
+        monkeypatch.setenv("OPENVIKING_API_KEY", "")
+
+        provider = OpenVikingMemoryProvider()
+        assert provider._ensure_client() is None
+        assert provider._client is None
+
+    def test_handle_tool_call_uses_ensure_client(self, monkeypatch):
+        provider = OpenVikingMemoryProvider()
+
+        class _StubClient:
+            def __init__(self, *a, **kw): pass
+            def health(self): return False
+
+        monkeypatch.setattr("plugins.memory.openviking._VikingClient", _StubClient)
+
+        out = provider.handle_tool_call("viking_search", {"query": "x"})
+        assert "not connected" in out.lower()

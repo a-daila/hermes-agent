@@ -92,14 +92,17 @@ class _VikingClient:
             raise ImportError("httpx is required for OpenViking: pip install httpx")
 
     def _headers(self) -> dict:
-        h = {
-            "Content-Type": "application/json",
-            "X-OpenViking-Account": self._account,
-            "X-OpenViking-User": self._user,
-            "X-OpenViking-Agent": self._agent,
-        }
+        h = {"Content-Type": "application/json"}
         if self._api_key:
+            # API-key auth: tenant is bound to the key on the server. Adding
+            # X-OpenViking-Account here triggers PERMISSION_DENIED with
+            # "X-OpenViking-Account cannot override the account for ADMIN/USER
+            # API keys." (#21130) — only send tenant headers in local-dev mode.
             h["X-API-Key"] = self._api_key
+        else:
+            h["X-OpenViking-Account"] = self._account
+            h["X-OpenViking-User"] = self._user
+            h["X-OpenViking-Agent"] = self._agent
         return h
 
     def _url(self, path: str) -> str:
@@ -310,32 +313,65 @@ class OpenVikingMemoryProvider(MemoryProvider):
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
-        self._endpoint = os.environ.get("OPENVIKING_ENDPOINT", _DEFAULT_ENDPOINT)
-        self._api_key = os.environ.get("OPENVIKING_API_KEY", "")
-        self._account = os.environ.get("OPENVIKING_ACCOUNT", "default")
-        self._user = os.environ.get("OPENVIKING_USER", "default")
-        self._agent = os.environ.get("OPENVIKING_AGENT", "hermes")
         self._session_id = session_id
         self._turn_count = 0
-
-        try:
-            self._client = _VikingClient(
-                self._endpoint, self._api_key,
-                account=self._account, user=self._user, agent=self._agent,
-            )
-            if not self._client.health():
-                logger.warning("OpenViking server at %s is not reachable", self._endpoint)
-                self._client = None
-        except ImportError:
-            logger.warning("httpx not installed — OpenViking plugin disabled")
-            self._client = None
+        # Snapshot env into the client; _ensure_client() refreshes on every
+        # subsequent access so /reload-loaded OPENVIKING_* values flow without
+        # a process restart (#21130).
+        self._ensure_client()
 
         # Register as the last active provider for atexit safety net
         global _last_active_provider
         _last_active_provider = self
 
+    def _ensure_client(self) -> Optional["_VikingClient"]:
+        """Return the active client, rebuilding it if env config has changed.
+
+        ``/reload`` only refreshes ``os.environ`` — the existing provider
+        instance is not re-initialized — so callers must consult the current
+        environment on each access. Re-builds + health-checks only when an
+        ``OPENVIKING_*`` value actually changed; subsequent calls reuse the
+        same client to avoid per-tool-call network overhead.
+        """
+        endpoint = os.environ.get("OPENVIKING_ENDPOINT", _DEFAULT_ENDPOINT)
+        api_key = os.environ.get("OPENVIKING_API_KEY", "")
+        account = os.environ.get("OPENVIKING_ACCOUNT", "default")
+        user = os.environ.get("OPENVIKING_USER", "default")
+        agent = os.environ.get("OPENVIKING_AGENT", "hermes")
+
+        config_unchanged = (
+            endpoint == self._endpoint
+            and api_key == self._api_key
+            and account == getattr(self, "_account", "default")
+            and user == getattr(self, "_user", "default")
+            and agent == getattr(self, "_agent", "hermes")
+        )
+        if config_unchanged and self._client is not None:
+            return self._client
+
+        self._endpoint = endpoint
+        self._api_key = api_key
+        self._account = account
+        self._user = user
+        self._agent = agent
+
+        try:
+            client = _VikingClient(
+                endpoint, api_key, account=account, user=user, agent=agent,
+            )
+        except ImportError:
+            logger.warning("httpx not installed — OpenViking plugin disabled")
+            self._client = None
+            return None
+        if not client.health():
+            logger.warning("OpenViking server at %s is not reachable", endpoint)
+            self._client = None
+            return None
+        self._client = client
+        return self._client
+
     def system_prompt_block(self) -> str:
-        if not self._client:
+        if not self._ensure_client():
             return ""
         # Provide brief info about the knowledge base
         try:
@@ -374,7 +410,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Fire a background search to pre-load relevant context."""
-        if not self._client or not query:
+        if not query or not self._ensure_client():
             return
 
         def _run():
@@ -410,7 +446,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Record the conversation turn in OpenViking's session (non-blocking)."""
-        if not self._client:
+        if not self._ensure_client():
             return
 
         self._turn_count += 1
@@ -451,7 +487,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         OpenViking automatically extracts 6 categories of memories:
         profile, preferences, entities, events, cases, and patterns.
         """
-        if not self._client:
+        if not self._ensure_client():
             return
 
         # Wait for any pending sync to finish first — do this before the
@@ -471,7 +507,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         """Mirror built-in memory writes to OpenViking as explicit memories."""
-        if not self._client or action != "add" or not content:
+        if action != "add" or not content or not self._ensure_client():
             return
 
         def _write():
@@ -498,7 +534,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         return [SEARCH_SCHEMA, READ_SCHEMA, BROWSE_SCHEMA, REMEMBER_SCHEMA, ADD_RESOURCE_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
-        if not self._client:
+        if not self._ensure_client():
             return tool_error("OpenViking server not connected")
 
         try:
