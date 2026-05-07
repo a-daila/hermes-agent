@@ -959,7 +959,17 @@ def _save_auth_store(auth_store: Dict[str, Any]) -> Path:
     payload = json.dumps(auth_store, indent=2) + "\n"
     tmp_path = auth_file.with_name(f"{auth_file.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     try:
-        with tmp_path.open("w", encoding="utf-8") as handle:
+        # Create the temp file at 0o600 atomically. The previous open("w")
+        # + post-replace chmod left the destination briefly at the process
+        # umask (commonly 0o644 = world-readable) between atomic_replace
+        # and chmod, exposing OAuth tokens to other local users. Mirrors
+        # agent/google_oauth.py (#19673).
+        fd = os.open(
+            str(tmp_path),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -979,11 +989,6 @@ def _save_auth_store(auth_store: Dict[str, Any]) -> Path:
                 tmp_path.unlink()
         except OSError:
             pass
-    # Restrict file permissions to owner only
-    try:
-        auth_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
     return auth_file
 
 
@@ -1523,10 +1528,32 @@ def _read_qwen_cli_tokens() -> Dict[str, Any]:
 def _save_qwen_cli_tokens(tokens: Dict[str, Any]) -> Path:
     auth_path = _qwen_cli_auth_path()
     auth_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = auth_path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(tokens, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
-    tmp_path.replace(auth_path)
+    payload = json.dumps(tokens, indent=2, sort_keys=True) + "\n"
+    # Per-process random suffix avoids collisions between concurrent
+    # writers and stale leftovers from a prior crashed write.
+    tmp_path = auth_path.with_name(f"{auth_path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+    try:
+        # Create the temp file at 0o600 atomically. The previous
+        # write_text + post-write chmod opened a TOCTOU window where the
+        # temp file briefly inherited the process umask (commonly 0o644
+        # = world-readable) before being tightened. Mirrors
+        # agent/google_oauth.py (#19673).
+        fd = os.open(
+            str(tmp_path),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, auth_path)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return auth_path
 
 
@@ -2842,13 +2869,32 @@ def _write_shared_nous_state(state: Dict[str, Any]) -> None:
     try:
         path = _nous_shared_store_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(shared, indent=2, sort_keys=True))
+        # Per-process random suffix avoids collisions between concurrent
+        # writers and stale leftovers from a prior crashed write.
+        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
         try:
-            os.chmod(tmp, 0o600)
+            # Create the temp file at 0o600 atomically. The previous
+            # write_text + post-write chmod opened a TOCTOU window where
+            # the temp file briefly inherited the process umask (commonly
+            # 0o644 = world-readable) before being tightened, exposing
+            # the cross-profile Nous refresh token to other local users.
+            # Mirrors agent/google_oauth.py (#19673).
+            fd = os.open(
+                str(tmp),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                stat.S_IRUSR | stat.S_IWUSR,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(shared, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
         except OSError:
-            pass
-        os.replace(tmp, path)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         _oauth_trace(
             "nous_shared_store_written",
             path=str(path),

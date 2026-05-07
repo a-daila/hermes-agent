@@ -1642,3 +1642,41 @@ def test_auth_remove_codex_manual_device_code_suppresses_canonical(tmp_path, mon
 
     auth_remove_command(SimpleNamespace(provider="openai-codex", target="1"))
     assert is_source_suppressed("openai-codex", "device_code")
+
+
+def test_save_auth_store_writes_at_0o600(tmp_path, monkeypatch):
+    """auth.json must land on disk at 0o600 with no umask-default exposure window.
+
+    Regression for the TOCTOU race where the post-replace ``chmod`` left
+    the destination briefly readable at the process umask (commonly 0o644)
+    between ``atomic_replace`` and the chmod, exposing OAuth tokens to
+    other local users. Mirrors the fix in #19673 (google_oauth) and
+    #21148 (mcp_oauth).
+    """
+    import os
+    import stat
+    import sys
+
+    if sys.platform.startswith("win"):
+        pytest.skip("POSIX mode bits not enforced on Windows")
+
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    # Force a permissive umask to ensure default file creation would NOT
+    # be 0o600 — the fix must override this via O_EXCL+mode regardless.
+    old_umask = os.umask(0o022)
+    try:
+        from hermes_cli.auth import _save_auth_store
+
+        store = {"version": 1, "providers": {}, "credential_pool": {}}
+        saved_path = _save_auth_store(store)
+    finally:
+        os.umask(old_umask)
+
+    assert saved_path.exists()
+    mode = stat.S_IMODE(saved_path.stat().st_mode)
+    assert mode == 0o600, (
+        f"auth.json mode {oct(mode)} != 0o600 with umask 0o022 — TOCTOU race regressed"
+    )
