@@ -92,14 +92,17 @@ class _VikingClient:
             raise ImportError("httpx is required for OpenViking: pip install httpx")
 
     def _headers(self) -> dict:
-        h = {
-            "Content-Type": "application/json",
-            "X-OpenViking-Account": self._account,
-            "X-OpenViking-User": self._user,
-            "X-OpenViking-Agent": self._agent,
-        }
+        h = {"Content-Type": "application/json"}
         if self._api_key:
+            # API-key auth: tenant is bound to the key on the server. Adding
+            # X-OpenViking-Account here triggers PERMISSION_DENIED with
+            # "X-OpenViking-Account cannot override the account for ADMIN/USER
+            # API keys." (#21130) — only send tenant headers in local-dev mode.
             h["X-API-Key"] = self._api_key
+        else:
+            h["X-OpenViking-Account"] = self._account
+            h["X-OpenViking-User"] = self._user
+            h["X-OpenViking-Agent"] = self._agent
         return h
 
     def _url(self, path: str) -> str:

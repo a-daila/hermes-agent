@@ -231,3 +231,48 @@ class TestOpenVikingBrowse:
             "/api/v1/fs/ls",
             {"uri": "viking://user/hermes"},
         )]
+
+
+# ===================================================================
+# Issue #21130 bug 1 — header conflict with API-key auth
+# ===================================================================
+
+from unittest.mock import patch as _patch
+from plugins.memory.openviking import _VikingClient as _Vc
+
+
+class TestVikingClientHeaders:
+    """Verify tenant headers don't conflict with API-key auth (#21130 bug 1)."""
+
+    def test_api_key_auth_omits_tenant_headers(self):
+        with _patch("plugins.memory.openviking._get_httpx", return_value=object()):
+            client = _Vc(
+                "http://srv:31933",
+                api_key="sk-key-123",
+                account="acct", user="usr", agent="agt",
+            )
+        h = client._headers()
+        assert h["X-API-Key"] == "sk-key-123"
+        assert "X-OpenViking-Account" not in h
+        assert "X-OpenViking-User" not in h
+        assert "X-OpenViking-Agent" not in h
+
+    def test_local_dev_mode_sends_tenant_headers(self):
+        with _patch("plugins.memory.openviking._get_httpx", return_value=object()):
+            client = _Vc(
+                "http://srv:31933",
+                api_key="",
+                account="acct", user="usr", agent="agt",
+            )
+        h = client._headers()
+        assert "X-API-Key" not in h
+        assert h["X-OpenViking-Account"] == "acct"
+        assert h["X-OpenViking-User"] == "usr"
+        assert h["X-OpenViking-Agent"] == "agt"
+
+    def test_content_type_always_present(self):
+        with _patch("plugins.memory.openviking._get_httpx", return_value=object()):
+            with_key = _Vc("http://srv", api_key="x")
+            no_key = _Vc("http://srv", api_key="")
+        assert with_key._headers()["Content-Type"] == "application/json"
+        assert no_key._headers()["Content-Type"] == "application/json"
