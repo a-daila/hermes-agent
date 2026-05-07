@@ -183,6 +183,57 @@ class TestMemoryStoreRemove:
         assert result["success"] is False
 
 
+class TestMemoryStoreClear:
+    def test_clear_empties_target(self, store):
+        store.add("memory", "fact A")
+        store.add("memory", "fact B")
+        result = store.clear("memory")
+        assert result["success"] is True
+        assert result["removed"] == 2
+        assert result["entry_count"] == 0
+        assert store.memory_entries == []
+
+    def test_clear_only_affects_named_target(self, store):
+        store.add("memory", "agent fact")
+        store.add("user", "user fact")
+        store.clear("memory")
+        assert store.memory_entries == []
+        assert store.user_entries == ["user fact"]
+
+    def test_clear_when_already_empty(self, store):
+        result = store.clear("memory")
+        assert result["success"] is True
+        assert result["removed"] == 0
+
+    def test_clear_persists_to_disk(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        s1 = MemoryStore()
+        s1.load_from_disk()
+        s1.add("memory", "persistent fact")
+        s1.clear("memory")
+
+        s2 = MemoryStore()
+        s2.load_from_disk()
+        assert s2.memory_entries == []
+
+
+class TestMemoryStoreSnapshotMethod:
+    def test_snapshot_returns_serializable_dict(self, store):
+        store.add("memory", "abc")
+        snap = store.snapshot("memory")
+        assert snap["entries"] == ["abc"]
+        assert snap["entry_count"] == 1
+        assert snap["char_count"] == 3
+        assert snap["char_limit"] == 500
+        assert 0 <= snap["usage_percent"] <= 100
+
+    def test_snapshot_empty_target(self, store):
+        snap = store.snapshot("user")
+        assert snap["entries"] == []
+        assert snap["entry_count"] == 0
+        assert snap["char_count"] == 0
+
+
 class TestMemoryStorePersistence:
     def test_save_and_load_roundtrip(self, tmp_path, monkeypatch):
         monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)

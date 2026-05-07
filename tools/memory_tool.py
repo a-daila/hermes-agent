@@ -358,6 +358,49 @@ class MemoryStore:
 
         return self._success_response(target, "Entry removed.")
 
+    def clear(self, target: str) -> Dict[str, Any]:
+        """Remove all entries from one store. Returns the count of entries
+        that were deleted.
+
+        Used by management/admin interfaces (e.g. ``hermes memory reset``,
+        the ``DELETE /api/memory`` HTTP endpoint).  Mid-session writes from
+        other processes are picked up under the file lock so we never wipe
+        a stale cached view.
+
+        The on-disk file is overwritten with an empty payload via the same
+        atomic-rename path as normal writes.  Subsequent ``load_from_disk``
+        calls will see a clean slate.
+        """
+        with self._file_lock(self._path_for(target)):
+            self._reload_target(target)
+
+            removed = len(self._entries_for(target))
+            self._set_entries(target, [])
+            self.save_to_disk(target)
+
+        resp = self._success_response(target, "All entries cleared.")
+        resp["removed"] = removed
+        return resp
+
+    def snapshot(self, target: str) -> Dict[str, Any]:
+        """Return a JSON-serializable snapshot of one store's current state.
+
+        Exposes entries, char counts, and usage for management/admin
+        callers (e.g. ``GET /api/memory``) without leaking the locking
+        primitives or other private internals.
+        """
+        entries = list(self._entries_for(target))
+        content = ENTRY_DELIMITER.join(entries) if entries else ""
+        limit = self._char_limit(target)
+        char_count = len(content)
+        return {
+            "entries": entries,
+            "entry_count": len(entries),
+            "char_count": char_count,
+            "char_limit": limit,
+            "usage_percent": min(100, int((char_count / limit) * 100)) if limit > 0 else 0,
+        }
+
     def format_for_system_prompt(self, target: str) -> Optional[str]:
         """
         Return the frozen snapshot for system prompt injection.

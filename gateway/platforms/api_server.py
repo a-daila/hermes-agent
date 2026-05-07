@@ -12,6 +12,8 @@ Exposes an HTTP server with endpoints:
 - GET  /v1/runs/{run_id}           — retrieve current run status
 - GET  /v1/runs/{run_id}/events    — SSE stream of structured lifecycle events
 - POST /v1/runs/{run_id}/stop    — interrupt a running agent
+- GET  /api/memory                 — list curated memory entries (MEMORY.md / USER.md)
+- DELETE /api/memory               — clear or remove curated memory entries
 - GET  /health                     — health check
 - GET  /health/detailed            — rich status for cross-container dashboard probing
 
@@ -2490,6 +2492,112 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response({"error": str(e)}, status=500)
 
     # ------------------------------------------------------------------
+    # Memory management API
+    #
+    # The built-in ``memory`` tool persists curated entries to
+    # ``~/.hermes/memories/MEMORY.md`` (agent notes) and ``USER.md``
+    # (user profile).  These two endpoints expose the stores to a
+    # management backend so it can list and prune entries without
+    # shelling out to ``hermes memory reset``.
+    #
+    # Note: this only covers the built-in file-backed store.  External
+    # memory providers (Honcho, retaindb, supermemory, ...) have their
+    # own delete APIs and are not proxied here.
+    # ------------------------------------------------------------------
+
+    _VALID_MEMORY_TARGETS = ("all", "memory", "user")
+
+    @staticmethod
+    def _parse_memory_target(request: "web.Request") -> tuple[str, Optional["web.Response"]]:
+        target = (request.query.get("target") or "all").strip().lower()
+        if target not in APIServerAdapter._VALID_MEMORY_TARGETS:
+            return target, web.json_response(
+                {"error": "target must be one of 'all', 'memory', 'user'"},
+                status=400,
+            )
+        return target, None
+
+    async def _handle_get_memory(self, request: "web.Request") -> "web.Response":
+        """GET /api/memory[?target=memory|user|all] — list curated memory entries.
+
+        Returns a JSON object keyed by target name; each value contains the
+        entries plus usage stats (char_count, char_limit, usage_percent).
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        target, target_err = self._parse_memory_target(request)
+        if target_err is not None:
+            return target_err
+        try:
+            from tools.memory_tool import MemoryStore
+            store = MemoryStore()
+            store.load_from_disk()
+            targets = ("memory", "user") if target == "all" else (target,)
+            payload = {t: store.snapshot(t) for t in targets}
+            return web.json_response(payload)
+        except Exception as e:
+            logger.exception("Failed to read memory")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_delete_memory(self, request: "web.Request") -> "web.Response":
+        """DELETE /api/memory[?target=memory|user|all][&old_text=...].
+
+        Two modes:
+        - With ``old_text``: removes the single entry containing that
+          substring from the given target (target must be ``memory`` or
+          ``user``, not ``all``).
+        - Without ``old_text``: clears every entry from the target(s).
+          With ``target=all`` (default), both stores are wiped.
+
+        The on-disk file is rewritten atomically.  The system-prompt
+        snapshot of any already-running session is unaffected — those
+        sessions need to restart to see the change, just like ``hermes
+        memory reset``.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        target, target_err = self._parse_memory_target(request)
+        if target_err is not None:
+            return target_err
+        old_text = (request.query.get("old_text") or "").strip()
+        try:
+            from tools.memory_tool import MemoryStore
+            store = MemoryStore()
+            if old_text:
+                if target == "all":
+                    return web.json_response(
+                        {"error": "old_text requires target='memory' or target='user'"},
+                        status=400,
+                    )
+                result = store.remove(target, old_text)
+                if not result.get("success"):
+                    return web.json_response(
+                        {"error": result.get("error", "Entry not found"), "matches": result.get("matches")},
+                        status=404 if "No entry matched" in str(result.get("error", "")) else 400,
+                    )
+                return web.json_response({
+                    "ok": True,
+                    "target": target,
+                    "removed": old_text,
+                    "remaining": store.snapshot(target),
+                })
+
+            targets = ("memory", "user") if target == "all" else (target,)
+            cleared = {}
+            for t in targets:
+                result = store.clear(t)
+                cleared[t] = {
+                    "removed": result.get("removed", 0),
+                    "entry_count": result.get("entry_count", 0),
+                }
+            return web.json_response({"ok": True, "target": target, "cleared": cleared})
+        except Exception as e:
+            logger.exception("Failed to delete memory")
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ------------------------------------------------------------------
     # Output extraction helper
     # ------------------------------------------------------------------
 
@@ -3064,6 +3172,9 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/jobs/{job_id}/pause", self._handle_pause_job)
             self._app.router.add_post("/api/jobs/{job_id}/resume", self._handle_resume_job)
             self._app.router.add_post("/api/jobs/{job_id}/run", self._handle_run_job)
+            # Curated memory management API (built-in MEMORY.md / USER.md)
+            self._app.router.add_get("/api/memory", self._handle_get_memory)
+            self._app.router.add_delete("/api/memory", self._handle_delete_memory)
             # Structured event streaming
             self._app.router.add_post("/v1/runs", self._handle_runs)
             self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)
