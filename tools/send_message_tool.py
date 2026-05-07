@@ -418,24 +418,31 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     }
 
 
-async def _send_via_adapter(platform, pconfig, chat_id, chunk):
-    """Send a message via a live gateway adapter (for plugin platforms).
-
-    Falls back to error if no adapter is connected for this platform.
-    """
+async def _send_via_adapter(platform, pconfig, chat_id, chunk, media_files=None):
+    """Send a message/media via a live gateway adapter."""
     try:
         from gateway.run import _gateway_runner_ref
         runner = _gateway_runner_ref()
         if runner:
             adapter = runner.adapters.get(platform)
             if adapter:
-                from gateway.platforms.base import SendResult
-                result = await adapter.send(chat_id=chat_id, content=chunk)
-                if result.success:
-                    return {"success": True, "message_id": result.message_id}
-                return {"error": f"Adapter send failed: {result.error}"}
+                last_result = None
+                if chunk:
+                    result = await adapter.send(chat_id=chat_id, content=chunk)
+                    if not result.success:
+                        return {"error": f"Adapter send failed: {result.error}"}
+                    last_result = result
+                for media_item in media_files or []:
+                    media_path = media_item[0] if isinstance(media_item, tuple) else media_item
+                    result = await adapter.send_document(chat_id=chat_id, file_path=media_path)
+                    if not result.success:
+                        return {"error": f"Adapter media send failed: {result.error}"}
+                    last_result = result
+                if last_result:
+                    return {"success": True, "message_id": last_result.message_id}
+                return {"success": True}
     except Exception as e:
-        return {"error": f"Plugin platform send failed: {e}"}
+        return {"error": f"Adapter send failed: {e}"}
     return {"error": f"No live adapter for platform '{platform.value}'. Is the gateway running with this platform connected?"}
 
 
@@ -608,11 +615,28 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
+    # --- DingTalk: native file support via running gateway adapter ---
+    if platform == Platform.DINGTALK and media_files:
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            result = await _send_via_adapter(
+                platform,
+                pconfig,
+                chat_id,
+                chunk,
+                media_files=media_files if is_last else None,
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result
+
     # --- Non-media platforms ---
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu; "
+                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and dingtalk; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -620,7 +644,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and dingtalk"
         )
 
     last_result = None

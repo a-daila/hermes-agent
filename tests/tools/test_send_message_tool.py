@@ -1992,3 +1992,31 @@ class TestSendSignalChunking:
         # Only the existing file made it into the RPC
         params = fake.calls[0]["payload"]["params"]
         assert len(params["attachments"]) == 1
+
+
+def test_dingtalk_media_uses_live_adapter_helper():
+    from tools import send_message_tool as smt
+
+    helper = AsyncMock(return_value={"success": True, "message_id": "file-1"})
+    media = [("/tmp/report.md", False)]
+    pconfig = SimpleNamespace(enabled=True, token=None, extra={})
+
+    with patch.object(smt, "_send_via_adapter", helper):
+        result = asyncio.run(
+            _send_to_platform(
+                Platform.DINGTALK,
+                pconfig,
+                "cid-example",
+                "please see attached",
+                media_files=media,
+            )
+        )
+
+    assert result["success"] is True
+    helper.assert_awaited_once_with(
+        Platform.DINGTALK,
+        pconfig,
+        "cid-example",
+        "please see attached",
+        media_files=media,
+    )
