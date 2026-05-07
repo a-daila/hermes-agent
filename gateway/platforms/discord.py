@@ -1329,14 +1329,28 @@ class DiscordAdapter(BasePlatformAdapter):
                 # Fetch the thread directly — threads are addressed by their own ID.
                 channel = self._client.get_channel(int(thread_id))
                 if not channel:
-                    channel = await self._client.fetch_channel(int(thread_id))
+                    try:
+                        channel = await self._client.fetch_channel(int(thread_id))
+                    except Exception as fetch_err:
+                        logger.warning(
+                            "[%s] Failed to fetch thread %s: %s",
+                            self.name, thread_id, fetch_err,
+                        )
+                        return SendResult(success=False, error=f"Thread {thread_id} not reachable")
                 if not channel:
                     return SendResult(success=False, error=f"Thread {thread_id} not found")
             else:
                 # Get the parent channel
                 channel = self._client.get_channel(int(chat_id))
                 if not channel:
-                    channel = await self._client.fetch_channel(int(chat_id))
+                    try:
+                        channel = await self._client.fetch_channel(int(chat_id))
+                    except Exception as fetch_err:
+                        logger.warning(
+                            "[%s] Failed to fetch channel %s: %s",
+                            self.name, chat_id, fetch_err,
+                        )
+                        return SendResult(success=False, error=f"Channel {chat_id} not reachable")
                 if not channel:
                     return SendResult(success=False, error=f"Channel {chat_id} not found")
 
@@ -1404,8 +1418,16 @@ class DiscordAdapter(BasePlatformAdapter):
             )
 
         except Exception as e:  # pragma: no cover - defensive logging
-            logger.error("[%s] Failed to send Discord message: %s", self.name, e, exc_info=True)
-            return SendResult(success=False, error=str(e))
+            # Downgrade to warning for common Discord API errors that callers
+            # already handle gracefully (e.g. shutdown notifications). Full
+            # traceback goes to debug — the caller has the context to decide
+            # whether the failure matters.
+            err_str = str(e)
+            if "403" in err_str or "50001" in err_str or "503" in err_str or "10003" in err_str:
+                logger.warning("[%s] Failed to send Discord message: %s", self.name, err_str)
+            else:
+                logger.error("[%s] Failed to send Discord message: %s", self.name, err_str, exc_info=True)
+            return SendResult(success=False, error=err_str)
 
     async def _send_to_forum(self, forum_channel: Any, content: str) -> SendResult:
         """Create a thread post in a forum channel with the message as starter content.
