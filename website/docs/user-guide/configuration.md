@@ -67,7 +67,10 @@ auxiliary:
 
 delegation:
   api_key: ${DELEGATION_KEY}
+  max_tokens: 64000
 ```
+
+`delegation.max_tokens` sets a child-specific output-token budget for `delegate_task` subagents. Use it when subagents doing code edits or large structured tool calls are hitting `finish_reason="length"` and truncating tool arguments. It does not increase the parent agent's output budget.
 
 Multiple references in a single value work: `url: "${HOST}:${PORT}"`. If a referenced variable is not set, the placeholder is kept verbatim (`${UNDEFINED_VAR}` stays as-is). Only the `${VAR}` syntax is supported — bare `$VAR` is not expanded.
 

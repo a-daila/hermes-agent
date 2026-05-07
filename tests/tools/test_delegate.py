@@ -93,6 +93,12 @@ class TestChildSystemPrompt(unittest.TestCase):
         prompt = _build_child_system_prompt("Do something", "  ")
         self.assertNotIn("CONTEXT", prompt)
 
+    def test_prompt_tells_subagents_to_avoid_oversized_tool_calls(self):
+        prompt = _build_child_system_prompt("Generate a report")
+        self.assertIn("Avoid oversized tool calls", prompt)
+        self.assertIn("small targeted patches", prompt)
+        self.assertIn("repo-local artifacts", prompt)
+
 
 class TestStripBlockedTools(unittest.TestCase):
     def test_removes_blocked_toolsets(self):
@@ -773,7 +779,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         mock_resolve.return_value = {
             "provider": "openrouter",
             "base_url": "https://openrouter.ai/api/v1",
-            "api_key": "sk-or-test-key",
+            "api_key": "***",
             "api_mode": "chat_completions",
         }
         parent = _make_mock_parent(depth=0)
@@ -782,9 +788,11 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["model"], "google/gemini-3-flash-preview")
         self.assertEqual(creds["provider"], "openrouter")
         self.assertEqual(creds["base_url"], "https://openrouter.ai/api/v1")
-        self.assertEqual(creds["api_key"], "sk-or-test-key")
+        self.assertEqual(creds["api_key"], "***")
         self.assertEqual(creds["api_mode"], "chat_completions")
-        mock_resolve.assert_called_once_with(requested="openrouter")
+        mock_resolve.assert_called_once_with(
+            requested="openrouter", target_model="google/gemini-3-flash-preview"
+        )
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_uses_runtime_model_when_config_model_missing(self, mock_resolve):
@@ -804,7 +812,9 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["model"], "server-default-model")
         self.assertEqual(creds["provider"], "custom")
         self.assertEqual(creds["base_url"], "https://my-server.example/v1")
-        mock_resolve.assert_called_once_with(requested="custom:my-server")
+        mock_resolve.assert_called_once_with(
+            requested="custom:my-server", target_model=None
+        )
 
     def test_direct_endpoint_uses_configured_base_url_and_api_key(self):
         parent = _make_mock_parent(depth=0)
@@ -868,7 +878,9 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["provider"], "nous")
         self.assertEqual(creds["base_url"], "https://inference-api.nousresearch.com/v1")
         self.assertEqual(creds["api_key"], "nous-agent-key-xyz")
-        mock_resolve.assert_called_once_with(requested="nous")
+        mock_resolve.assert_called_once_with(
+            requested="nous", target_model="hermes-3-llama-3.1-8b"
+        )
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_failure_raises_valueerror(self, mock_resolve):
@@ -1083,6 +1095,68 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs["model"], parent.model)
             self.assertEqual(kwargs["provider"], parent.provider)
             self.assertEqual(kwargs["base_url"], parent.base_url)
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_delegation_max_tokens_overrides_parent_for_child_agent(
+        self, mock_creds, mock_cfg
+    ):
+        """delegation.max_tokens can raise child output budget above parent."""
+        mock_cfg.return_value = {"max_iterations": 45, "max_tokens": 64000}
+        mock_creds.return_value = {
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.max_tokens = 8000
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Test max token override", parent_agent=parent)
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["max_tokens"], 64000)
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_invalid_delegation_max_tokens_falls_back_to_parent(
+        self, mock_creds, mock_cfg
+    ):
+        """Invalid delegation.max_tokens should not break child creation."""
+        mock_cfg.return_value = {"max_iterations": 45, "max_tokens": "not-a-number"}
+        mock_creds.return_value = {
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.max_tokens = 12000
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Test invalid max token override", parent_agent=parent)
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["max_tokens"], 12000)
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
@@ -1628,9 +1702,12 @@ class TestDelegateHeartbeat(unittest.TestCase):
 
         child.run_conversation.side_effect = slow_run
 
-        # At interval 0.05s, idle threshold (5 cycles) trips at ~0.25s.
-        # We should see the heartbeat stop firing well before 0.6s.
-        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05):
+        # Patch both the interval and the idle stale ceiling so the test keeps
+        # its fast runtime while still exercising the idle-path branch under the
+        # current production default (_HEARTBEAT_STALE_CYCLES_IDLE=15).
+        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05), patch(
+            "tools.delegate_tool._HEARTBEAT_STALE_CYCLES_IDLE", 5
+        ):
             _run_single_child(
                 task_index=0,
                 goal="Test wedged child",
@@ -1638,8 +1715,8 @@ class TestDelegateHeartbeat(unittest.TestCase):
                 parent_agent=parent,
             )
 
-        # With idle threshold=5 + interval=0.05s, touches should cap
-        # around 5. Bound loosely to avoid timing flakes.
+        # With idle threshold=5 + interval=0.05s, touches should cap around 5.
+        # Bound loosely to avoid timing flakes.
         self.assertLess(
             len(touch_calls), 9,
             f"Idle stale detection did not fire: got {len(touch_calls)} "
