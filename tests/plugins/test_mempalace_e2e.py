@@ -8,6 +8,11 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("mempalace") is None,
+    reason="mempalace package not installed — install with: pip install mempalace",
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "memory" / "mempalace"
 INIT_FILE = PLUGIN_DIR / "__init__.py"
