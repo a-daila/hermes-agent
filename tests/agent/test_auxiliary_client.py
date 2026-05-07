@@ -512,6 +512,124 @@ class TestExplicitProviderRouting:
             for record in caplog.records
         )
 
+
+class TestCustomBranchInheritsMainApiKey:
+    """provider='custom' with an empty api_key must inherit model.api_key when
+    the auxiliary base_url targets the same endpoint as the main runtime
+    (issue #21121).  Without this, a per-task base_url override silently sends
+    Bearer no-key-required to an authenticated custom endpoint and 401s.
+    """
+
+    def test_inherits_main_api_key_when_endpoint_matches(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            client, _ = resolve_provider_client(
+                "custom",
+                model="gemma4-31b",
+                explicit_base_url="http://localhost:8081/v1",
+                explicit_api_key="",
+                main_runtime={
+                    "provider": "custom",
+                    "model": "gemma4-31b",
+                    "base_url": "http://localhost:8081/v1",
+                    "api_key": "main-vllm-key",
+                },
+            )
+        assert client is not None
+        assert mock_openai.call_args.kwargs["api_key"] == "main-vllm-key"
+
+    def test_does_not_inherit_when_host_differs(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            client, _ = resolve_provider_client(
+                "custom",
+                model="gemma4-31b",
+                explicit_base_url="http://other-host.local:8081/v1",
+                explicit_api_key="",
+                main_runtime={
+                    "provider": "custom",
+                    "model": "gemma4-31b",
+                    "base_url": "http://localhost:8081/v1",
+                    "api_key": "main-vllm-key",
+                },
+            )
+        assert client is not None
+        assert mock_openai.call_args.kwargs["api_key"] == "no-key-required"
+
+    def test_does_not_inherit_when_port_differs(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            client, _ = resolve_provider_client(
+                "custom",
+                model="gemma4-31b",
+                explicit_base_url="http://localhost:9000/v1",
+                explicit_api_key="",
+                main_runtime={
+                    "provider": "custom",
+                    "model": "gemma4-31b",
+                    "base_url": "http://localhost:8081/v1",
+                    "api_key": "main-vllm-key",
+                },
+            )
+        assert client is not None
+        assert mock_openai.call_args.kwargs["api_key"] == "no-key-required"
+
+    def test_explicit_api_key_still_wins_over_main(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            client, _ = resolve_provider_client(
+                "custom",
+                model="gemma4-31b",
+                explicit_base_url="http://localhost:8081/v1",
+                explicit_api_key="task-specific-key",
+                main_runtime={
+                    "provider": "custom",
+                    "model": "gemma4-31b",
+                    "base_url": "http://localhost:8081/v1",
+                    "api_key": "main-vllm-key",
+                },
+            )
+        assert client is not None
+        assert mock_openai.call_args.kwargs["api_key"] == "task-specific-key"
+
+    def test_inherit_skipped_when_main_runtime_missing(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            client, _ = resolve_provider_client(
+                "custom",
+                model="gemma4-31b",
+                explicit_base_url="http://localhost:8081/v1",
+                explicit_api_key="",
+                main_runtime=None,
+            )
+        assert client is not None
+        assert mock_openai.call_args.kwargs["api_key"] == "no-key-required"
+
+    def test_default_https_port_matches_explicit_443(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            client, _ = resolve_provider_client(
+                "custom",
+                model="m",
+                explicit_base_url="https://api.example.com/v1",
+                explicit_api_key="",
+                main_runtime={
+                    "provider": "custom",
+                    "model": "m",
+                    "base_url": "https://api.example.com:443/v2",
+                    "api_key": "main-key",
+                },
+            )
+        assert client is not None
+        assert mock_openai.call_args.kwargs["api_key"] == "main-key"
+
+
 class TestGetTextAuxiliaryClient:
     """Test the full resolution chain for get_text_auxiliary_client."""
 

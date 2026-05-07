@@ -444,6 +444,43 @@ def _codex_cloudflare_headers(access_token: str) -> Dict[str, str]:
     return headers
 
 
+def _same_endpoint(base_url_a: str, base_url_b: str) -> bool:
+    """Return True when both URLs target the same network endpoint.
+
+    Compares hostname (case-insensitive) and effective port — ports are
+    inferred from the scheme when omitted (https→443, http→80) so
+    ``https://api.example.com/v1`` matches ``https://api.example.com:443/v2``.
+    Used to decide whether an auxiliary task's pinned ``base_url`` and the
+    main runtime's ``base_url`` point at the same server (and therefore can
+    share ``api_key``).
+    """
+    from urllib.parse import urlparse
+
+    def _hostport(raw: str) -> Tuple[str, Optional[int]]:
+        s = (raw or "").strip()
+        if not s:
+            return "", None
+        parsed = urlparse(s if "://" in s else f"//{s}")
+        host = (parsed.hostname or "").lower().rstrip(".")
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port is None:
+            scheme = (parsed.scheme or "").lower()
+            if scheme == "https":
+                port = 443
+            elif scheme == "http":
+                port = 80
+        return host, port
+
+    host_a, port_a = _hostport(base_url_a)
+    host_b, port_b = _hostport(base_url_b)
+    if not host_a or not host_b:
+        return False
+    return host_a == host_b and port_a == port_b
+
+
 def _to_openai_base_url(base_url: str) -> str:
     """Normalize an Anthropic-style base URL to OpenAI-compatible format.
 
@@ -2342,8 +2379,20 @@ def resolve_provider_client(
     if provider == "custom":
         if explicit_base_url:
             custom_base = _to_openai_base_url(explicit_base_url).strip()
+            # When the auxiliary endpoint shares its netloc (host + port) with
+            # the active main runtime, inherit ``model.api_key`` so users who
+            # pinned a per-task ``base_url`` (via dashboard, ``hermes setup``,
+            # or hand-edit) without also pinning ``api_key`` don't silently
+            # send ``Bearer no-key-required`` to an authenticated endpoint.
+            inherited_main_key = ""
+            if not (explicit_api_key or "").strip() and main_runtime:
+                main_base = str(main_runtime.get("base_url") or "").strip()
+                main_key = str(main_runtime.get("api_key") or "").strip()
+                if main_base and main_key and _same_endpoint(main_base, custom_base):
+                    inherited_main_key = main_key
             custom_key = (
                 (explicit_api_key or "").strip()
+                or inherited_main_key
                 or os.getenv("OPENAI_API_KEY", "").strip()
                 or "no-key-required"  # local servers don't need auth
             )
