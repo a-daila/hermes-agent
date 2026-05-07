@@ -34,7 +34,11 @@ async def test_restart_command_while_busy_requests_drain_without_interrupt(monke
 
     assert result == "⏳ Draining 1 active agent(s) before restart..."
     running_agent.interrupt.assert_not_called()
-    runner.request_restart.assert_called_once_with(detached=True, via_service=False)
+    runner.request_restart.assert_called_once_with(
+        detached=True,
+        via_service=False,
+        exclude_session_key=session_key,
+    )
 
 
 @pytest.mark.asyncio
