@@ -889,3 +889,47 @@ class TestSendVideo:
 
         call_kwargs = connected_adapter._bot.send_video.call_args[1]
         assert call_kwargs["message_thread_id"] == 789
+
+
+class TestTelegramSendVideo:
+    @pytest.mark.asyncio
+    async def test_send_video_passes_explicit_dimensions_and_thumbnail(self, adapter, tmp_path):
+        video_path = tmp_path / "vertical.mp4"
+        video_path.write_bytes(b"fake-video")
+        thumb_path = tmp_path / "thumb.jpg"
+        thumb_path.write_bytes(b"fake-thumb")
+
+        adapter._bot = MagicMock()
+        adapter._bot.send_video = AsyncMock(return_value=SimpleNamespace(message_id=123))
+        adapter._telegram_video_metadata = MagicMock(return_value=(720, 1280, 36, str(thumb_path)))
+
+        result = await adapter.send_video(chat_id="100", video_path=str(video_path), caption="hello")
+
+        assert result.success is True
+        adapter._bot.send_video.assert_awaited_once()
+        kwargs = adapter._bot.send_video.await_args.kwargs
+        assert kwargs["width"] == 720
+        assert kwargs["height"] == 1280
+        assert kwargs["duration"] == 36
+        assert kwargs["supports_streaming"] is True
+        assert "thumbnail" in kwargs
+        assert not thumb_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_send_video_works_without_probe_metadata(self, adapter, tmp_path):
+        video_path = tmp_path / "video.mp4"
+        video_path.write_bytes(b"fake-video")
+
+        adapter._bot = MagicMock()
+        adapter._bot.send_video = AsyncMock(return_value=SimpleNamespace(message_id=124))
+        adapter._telegram_video_metadata = MagicMock(return_value=(None, None, None, None))
+
+        result = await adapter.send_video(chat_id="100", video_path=str(video_path))
+
+        assert result.success is True
+        kwargs = adapter._bot.send_video.await_args.kwargs
+        assert kwargs["width"] is None
+        assert kwargs["height"] is None
+        assert kwargs["duration"] is None
+        assert kwargs["supports_streaming"] is True
+        assert "thumbnail" not in kwargs

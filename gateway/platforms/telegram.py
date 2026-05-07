@@ -2393,6 +2393,77 @@ class TelegramAdapter(BasePlatformAdapter):
             print(f"[{self.name}] Failed to send document: {e}")
             return await super().send_document(chat_id, file_path, caption, file_name, reply_to)
 
+    def _telegram_video_metadata(self, video_path: str) -> tuple[Optional[int], Optional[int], Optional[int], Optional[str]]:
+        """Probe a local video and generate a Telegram-safe thumbnail.
+
+        Telegram can mis-detect vertical MP4s when the Bot API call omits
+        dimensions. Best-effort metadata keeps native playback vertical while
+        falling back cleanly if ffprobe/ffmpeg are unavailable.
+        """
+        width = height = duration = None
+        thumb_path = None
+
+        try:
+            import subprocess
+
+            probe_raw = subprocess.check_output(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=width,height:format=duration",
+                    "-of", "json",
+                    video_path,
+                ],
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            probe = json.loads(probe_raw.decode("utf-8", errors="replace"))
+            stream = (probe.get("streams") or [{}])[0]
+            width = int(stream.get("width") or 0) or None
+            height = int(stream.get("height") or 0) or None
+            raw_duration = (probe.get("format") or {}).get("duration")
+            if raw_duration is not None:
+                duration = max(1, int(round(float(raw_duration))))
+
+            thumb_fd, thumb_path = tempfile.mkstemp(prefix="hermes_tg_video_thumb_", suffix=".jpg")
+            os.close(thumb_fd)
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-ss", "0.5", "-i", video_path,
+                    "-frames:v", "1",
+                    "-vf", "scale='if(gt(iw,ih),320,-2)':'if(gt(ih,iw),320,-2)'",
+                    "-q:v", "3",
+                    thumb_path,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+                check=True,
+            )
+        except Exception as exc:
+            logger.debug(
+                "[%s] Could not probe/generate video metadata for Telegram send: %s",
+                self.name,
+                exc,
+            )
+            if thumb_path:
+                try:
+                    os.unlink(thumb_path)
+                except OSError:
+                    pass
+            thumb_path = None
+
+        return width, height, duration, thumb_path
+
+    @staticmethod
+    def _safe_unlink(path: Optional[str]) -> None:
+        if not path:
+            return
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
     async def send_video(
         self,
         chat_id: str,
@@ -2406,23 +2477,36 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._bot:
             return SendResult(success=False, error="Not connected")
 
+        thumb_path = None
         try:
             if not os.path.exists(video_path):
                 return SendResult(success=False, error=self._missing_media_path_error("Video", video_path))
 
+            width, height, duration, thumb_path = self._telegram_video_metadata(video_path)
             _thread = self._metadata_thread_id(metadata)
+            send_kwargs = {
+                "chat_id": int(chat_id),
+                "caption": caption[:1024] if caption else None,
+                "reply_to_message_id": int(reply_to) if reply_to else None,
+                "message_thread_id": self._message_thread_id_for_send(_thread),
+                "width": width,
+                "height": height,
+                "duration": duration,
+                "supports_streaming": True,
+            }
+
             with open(video_path, "rb") as f:
-                msg = await self._bot.send_video(
-                    chat_id=int(chat_id),
-                    video=f,
-                    caption=caption[:1024] if caption else None,
-                    reply_to_message_id=int(reply_to) if reply_to else None,
-                    message_thread_id=self._message_thread_id_for_send(_thread),
-                )
+                if thumb_path and os.path.exists(thumb_path):
+                    with open(thumb_path, "rb") as thumb:
+                        msg = await self._bot.send_video(video=f, thumbnail=thumb, **send_kwargs)
+                else:
+                    msg = await self._bot.send_video(video=f, **send_kwargs)
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
             print(f"[{self.name}] Failed to send video: {e}")
             return await super().send_video(chat_id, video_path, caption, reply_to)
+        finally:
+            self._safe_unlink(thumb_path)
 
     async def send_image(
         self,
