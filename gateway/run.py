@@ -2302,19 +2302,20 @@ class GatewayRunner:
                 pass
 
         status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
+        system_prefix = "[System] "
         if is_steer_mode:
             message = (
-                f"⏩ Steered into current run{status_detail}. "
+                f"{system_prefix}⏩ Steered into current run{status_detail}. "
                 f"Your message arrives after the next tool call."
             )
         elif is_queue_mode:
             message = (
-                f"⏳ Queued for the next turn{status_detail}. "
+                f"{system_prefix}⏳ Queued for the next turn{status_detail}. "
                 f"I'll respond once the current task finishes."
             )
         else:
             message = (
-                f"⚡ Interrupting current task{status_detail}. "
+                f"{system_prefix}⚡ Interrupting current task{status_detail}. "
                 f"I'll respond to your message shortly."
             )
 

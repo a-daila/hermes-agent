@@ -2250,7 +2250,7 @@ class BasePlatformAdapter(ABC):
                 # All retries exhausted (loop completed without break) — notify user
                 logger.error("[%s] Failed to deliver response after %d retries: %s", self.name, max_retries, error_str)
                 notice = (
-                    "\u26a0\ufe0f Message delivery failed after multiple attempts. "
+                    "[System] \u26a0\ufe0f Message delivery failed after multiple attempts. "
                     "Please try again \u2014 your request was processed but the response could not be sent."
                 )
                 try:

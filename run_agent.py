@@ -1347,6 +1347,11 @@ class AIAgent:
         # router-based implicit auth) can apply it consistently.  Bedrock
         # Claude uses its own timeout path and is not covered here.
         _provider_timeout = get_provider_request_timeout(self.provider, self.model)
+        # Default fallback: prevent unbounded hangs when the provider config doesn't
+        # specify request_timeout_seconds (e.g. default Ollama / local model setups).
+        # The OpenAI SDK defaults to ~600s without an explicit timeout.
+        if _provider_timeout is None:
+            _provider_timeout = 120.0
 
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
