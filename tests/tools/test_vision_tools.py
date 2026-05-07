@@ -425,6 +425,36 @@ class TestVisionConfig:
         assert mock_llm.await_args.kwargs["temperature"] == 0.1
         assert mock_llm.await_args.kwargs["timeout"] == 120.0
 
+    @pytest.mark.asyncio
+    async def test_vision_llm_await_is_bounded_by_configured_timeout(self, tmp_path):
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+
+        async def slow_llm(**_kwargs):
+            await asyncio.sleep(1)
+
+        with (
+            patch("hermes_cli.config.load_config", return_value={
+                "auxiliary": {"vision": {"timeout": 0.01}}
+            }),
+            patch(
+                "tools.vision_tools._image_to_base64_data_url",
+                return_value="data:image/png;base64,abc",
+            ),
+            patch(
+                "tools.vision_tools.async_call_llm",
+                new_callable=AsyncMock,
+                side_effect=slow_llm,
+            ) as mock_llm,
+        ):
+            result = json.loads(await vision_analyze_tool(str(img), "describe this", "test/model"))
+
+        assert result["success"] is False
+        assert "timed out" in result["analysis"].lower()
+        await_args = mock_llm.await_args
+        assert await_args is not None
+        assert await_args.kwargs["timeout"] == 0.01
+
 
 class TestVisionSafetyGuards:
     @pytest.mark.asyncio

@@ -3,7 +3,7 @@ name: Lint (ruff + ty)
 # Surface ruff and ty diagnostics as a diff vs the target branch.
 # This check is advisory only ATM it always exits zero and never blocks merge.
 # It posts a Markdown summary to the workflow run and, for pull requests,
-# comments the same summary on the PR.
+# comments the same summary on same-repository PRs where the token can write.
 
 on:
   push:
@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: read
+  issues: write # needed because PR comments use the Issues comments API
   pull-requests: write # needed to post/update PR comments
 
 concurrency:
@@ -119,7 +120,7 @@ jobs:
           retention-days: 14
 
       - name: Post / update PR comment
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
         with:
           script: |
