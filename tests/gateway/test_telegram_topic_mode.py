@@ -776,6 +776,149 @@ async def test_topic_root_command_creates_and_pins_system_topic(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_new_with_title_renames_current_telegram_topic(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.apply_telegram_topic_migration()
+    db.create_session("sess-topic", source="telegram", user_id="208214988")
+    runner = _make_runner(session_db=db)
+    runner._telegram_topic_mode_enabled = lambda source: True
+
+    result = await runner._handle_reset_command(
+        _make_event("/new Fix Telegram topic titles", thread_id="42")
+    )
+
+    assert "Fix Telegram topic titles" in result.text
+    runner.adapters[Platform.TELEGRAM].rename_dm_topic.assert_awaited_once_with(
+        chat_id="208214988",
+        thread_id="42",
+        name="Fix Telegram topic titles",
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_with_title_does_not_rename_topic_when_title_store_fails(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.apply_telegram_topic_migration()
+    db.create_session("sess-topic", source="telegram", user_id="208214988")
+    runner = _make_runner(session_db=db)
+    runner._telegram_topic_mode_enabled = lambda source: True
+    runner._session_db.set_session_title = MagicMock(return_value=False)
+
+    result = await runner._handle_reset_command(
+        _make_event("/new Unsaved Topic Title", thread_id="42")
+    )
+
+    assert "could not be stored" in result.text
+    runner.adapters[Platform.TELEGRAM].rename_dm_topic.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_new_with_title_does_not_rename_general_telegram_topic(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.apply_telegram_topic_migration()
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    db.create_session("sess-topic", source="telegram", user_id="208214988")
+    runner = _make_runner(session_db=db)
+
+    result = await runner._handle_reset_command(
+        _make_event("/new General Topic Title", thread_id="1")
+    )
+
+    assert "General Topic Title" in result.text
+    runner.adapters[Platform.TELEGRAM].rename_dm_topic.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_new_with_title_does_not_rename_operator_declared_topic(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.apply_telegram_topic_migration()
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    db.create_session("sess-topic", source="telegram", user_id="208214988")
+    runner = _make_runner(session_db=db)
+
+    class _FakeAdapter:
+        def _get_dm_topic_info(self, chat_id, thread_id):
+            return {"name": "Research", "skill": "arxiv"}
+
+        async def rename_dm_topic(self, **kwargs):
+            return None
+
+    fake = _FakeAdapter()
+    fake.rename_dm_topic = AsyncMock()
+    runner.adapters[Platform.TELEGRAM] = fake
+
+    result = await runner._handle_reset_command(
+        _make_event("/new Operator Topic Title", thread_id="17585")
+    )
+
+    assert "Operator Topic Title" in result.text
+    fake.rename_dm_topic.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_title_command_renames_current_telegram_topic(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.apply_telegram_topic_migration()
+    db.create_session("sess-topic", source="telegram", user_id="208214988")
+    runner = _make_runner(session_db=db)
+    runner._telegram_topic_mode_enabled = lambda source: True
+
+    result = await runner._handle_title_command(
+        _make_event("/title Config Changes", thread_id="42")
+    )
+
+    assert "Session title set" in result
+    runner.adapters[Platform.TELEGRAM].rename_dm_topic.assert_awaited_once_with(
+        chat_id="208214988",
+        thread_id="42",
+        name="Config Changes",
+    )
+
+
+@pytest.mark.asyncio
+async def test_title_command_does_not_rename_general_telegram_topic(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.apply_telegram_topic_migration()
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    db.create_session("sess-topic", source="telegram", user_id="208214988")
+    runner = _make_runner(session_db=db)
+
+    result = await runner._handle_title_command(
+        _make_event("/title General Topic Title", thread_id="1")
+    )
+
+    assert "Session title set" in result
+    runner.adapters[Platform.TELEGRAM].rename_dm_topic.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_title_command_does_not_rename_operator_declared_topic(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.apply_telegram_topic_migration()
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    db.create_session("sess-topic", source="telegram", user_id="208214988")
+    runner = _make_runner(session_db=db)
+
+    class _FakeAdapter:
+        def _get_dm_topic_info(self, chat_id, thread_id):
+            return {"name": "Research", "skill": "arxiv"}
+
+        async def rename_dm_topic(self, **kwargs):
+            return None
+
+    fake = _FakeAdapter()
+    fake.rename_dm_topic = AsyncMock()
+    runner.adapters[Platform.TELEGRAM] = fake
+
+    result = await runner._handle_title_command(
+        _make_event("/title Operator Topic Title", thread_id="17585")
+    )
+
+    assert "Session title set" in result
+    fake.rename_dm_topic.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_auto_generated_title_renames_bound_telegram_topic(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     db.apply_telegram_topic_migration()
